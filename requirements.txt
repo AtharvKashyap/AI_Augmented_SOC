@@ -10,7 +10,7 @@ python-dotenv>=1.0.1
 requests>=2.32.0
 
 # Data validation and typed models
-pydantic>=2.7.0
+pydantic>=2.13.4
 
 # Testing
 pytest>=9.0.3
