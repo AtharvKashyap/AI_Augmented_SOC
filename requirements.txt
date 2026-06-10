@@ -1,0 +1,19 @@
+# AI_Augmented_SOC Python dependencies
+#
+# Keep this file small during the MVP. Add dependencies only when they are
+# actually used by the codebase.
+
+# Environment/config loading
+python-dotenv>=1.0.1
+
+# HTTP clients for Wazuh, Security Onion, OpenRouter, and enrichment APIs
+requests>=2.32.0
+
+# Data validation and typed models
+pydantic>=2.7.0
+
+# Testing
+pytest>=8.2.0
+
+# Linting / code quality
+ruff>=0.5.0
