@@ -23,6 +23,10 @@ ENV/
 .env.*
 !.env.example
 
+data/
+output/
+logs/
+
 # Generated runtime files
 logs/*
 !logs/.gitkeep

@@ -2,7 +2,9 @@
 
 > AI-assisted triage, enrichment, and incident reporting for Wazuh + Security Onion environments, with Splunk and OpenBSD `pfctl` integrations planned for later phases.
 
-[![CI](https://img.shields.io/badge/CI-passing-brightgreen)](#)
+[![CI](https://github.com/your-org/AI_Augmented_SOC/actions/workflows/ci.yml/badge.svg)](https://github.com/your-org/AI_Augmented_SOC/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/your-org/AI_Augmented_SOC/actions/workflows/codeql.yml/badge.svg)](https://github.com/your-org/AI_Augmented_SOC/actions/workflows/codeql.yml)
+[![Secret Scan](https://github.com/your-org/AI_Augmented_SOC/actions/workflows/secrets.yml/badge.svg)](https://github.com/your-org/AI_Augmented_SOC/actions/workflows/secrets.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](#)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](#)
 
@@ -10,7 +12,7 @@
 
 ## What this does
 
-Security teams running Wazuh and Security Onion often need a faster way to consolidate endpoint and network evidence, even when alert volume is low. This project adds a tested Python orchestration layer that can run in replay mode today and can be extended into live Wazuh / Security Onion polling as the next phase.
+Security teams running Wazuh and Security Onion often need a faster way to consolidate endpoint and network evidence, even when alert volume is low. This project currently provides a tested replay-driven SOC pipeline and CLI, with live Wazuh ingestion as the next implementation phase.
 
 The current MVP foundation:
 
@@ -25,7 +27,11 @@ The current MVP foundation:
 - **Sends notifications** through dry-run mode, SMTP email, or Slack-compatible webhooks
 - **Persists SOC objects** including raw events, alerts, incident candidates, triage results, routing decisions, and dedup keys
 
+- **Runs from a real CLI** through `run_pipeline.py`, producing a JSON summary, SQLite database records, and Markdown incident reports
+
 No SOAR platform required. The MVP is intentionally modular: each SOC stage is unit tested separately, and `soc/pipeline.py` coordinates the full workflow end-to-end.
+
+Current live-ingestion status: replay/manual mode is working now. The next phase is real Wazuh integration using the Wazuh Manager API for agent context and the Wazuh Indexer API for alert search. Manual JSON replay is for testing, demos, and low-alert environments; it is not intended to replace live Wazuh polling.
 
 ---
 
@@ -34,7 +40,7 @@ No SOAR platform required. The MVP is intentionally modular: each SOC stage is u
 | Layer | Tool / Module |
 |---|---|
 | Replay / testing | JSON replay files and manual test fixtures |
-| Endpoint detection | Wazuh agents → Wazuh Manager |
+| Endpoint detection | Wazuh agents → Wazuh Manager; Wazuh Indexer alert search planned next |
 | Network sensor | Security Onion (Suricata, Zeek) |
 | Normalization | `soc/normalizer.py` |
 | Deduplication / persistence | SQLite via `soc/store.py` and `soc/dedup.py` |
@@ -60,9 +66,10 @@ No SOAR platform required. The MVP is intentionally modular: each SOC stage is u
 
 - Python 3.11+
 - `pip` and a virtual environment
-- OpenRouter API key for LLM-assisted triage: https://openrouter.ai
-- Optional: Wazuh Manager accessible from the SOC automation host
-- Optional: Security Onion accessible from the SOC automation host
+- Optional: OpenRouter API key for LLM-assisted triage: https://openrouter.ai
+- Optional next phase: Wazuh Manager API reachable from the SOC automation host, usually `https://<manager>:55000`
+- Optional next phase: Wazuh Indexer API reachable from the SOC automation host, usually `https://<indexer>:9200`
+- Optional later phase: Security Onion accessible from the SOC automation host
 - Optional: SMTP credentials for email report delivery
 - Optional: Slack-compatible webhook URL for notifications
 - Optional later enrichment providers: VirusTotal, AbuseIPDB, Shodan
@@ -109,10 +116,18 @@ OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
 OPENROUTER_MODEL=openrouter/free
 OPENROUTER_REPORT_MODEL=
 
-# Optional live Wazuh access
-WAZUH_HOST=https://your-wazuh-manager:55000
-WAZUH_USER=wazuh-wui
-WAZUH_PASSWORD=your-password
+# Optional next phase: live Wazuh access
+WAZUH_MANAGER_URL=https://your-wazuh-manager:55000
+WAZUH_MANAGER_USER=wazuh-wui
+WAZUH_MANAGER_PASSWORD=your-password
+WAZUH_MANAGER_VERIFY_TLS=false
+
+WAZUH_INDEXER_URL=https://your-wazuh-indexer:9200
+WAZUH_INDEXER_USER=admin
+WAZUH_INDEXER_PASSWORD=your-password
+WAZUH_INDEXER_VERIFY_TLS=false
+WAZUH_ALERT_INDEX=wazuh-alerts-*
+WAZUH_ALERT_LIMIT=100
 
 # Optional live Security Onion access
 SECURITYONION_HOST=https://your-securityonion
@@ -126,6 +141,7 @@ Optional `.env` values:
 POLL_INTERVAL_SECONDS=120
 ALERT_LOOKBACK_MINUTES=5
 WAZUH_MIN_LEVEL=7
+WAZUH_ALERT_LOOKBACK_MINUTES=5
 SO_MIN_SEVERITY=2
 
 VIRUSTOTAL_API_KEY=
@@ -209,15 +225,81 @@ result = pipeline.run_replay_directory("tests/fixtures/manual_events")
 print(result.to_summary())
 ```
 
-### Run a future CLI entry point
+### Run the CLI replay demo
 
-The intended thin CLI wrapper is:
+The main runnable MVP command is:
 
 ```bash
-python3 run_pipeline.py --replay tests/fixtures/sample_incident_replay.json
+python3 run_pipeline.py \
+  --replay tests/fixtures/sample_incident_replay.json \
+  --db data/soc.db \
+  --output output \
+  --pretty
 ```
 
-`run_pipeline.py` should remain small and call `soc.pipeline.SOCPipeline`. The core workflow logic belongs in `soc/pipeline.py`.
+This loads the sample replay file, stores processed SOC objects in SQLite, writes a Markdown incident report to `output/`, and prints a JSON run summary.
+
+Example summary:
+
+```json
+{
+  "raw_events": 3,
+  "normalized_alerts": 3,
+  "accepted_alerts": 3,
+  "candidates": 1,
+  "reports": 1,
+  "errors": []
+}
+```
+
+For repeat demos with the same replay file, disable deduplication:
+
+```bash
+python3 run_pipeline.py \
+  --replay tests/fixtures/sample_incident_replay.json \
+  --db data/soc.db \
+  --output output \
+  --no-dedup \
+  --pretty
+```
+
+For a safe notification demo without sending real email or Slack messages:
+
+```bash
+python3 run_pipeline.py \
+  --replay tests/fixtures/sample_incident_replay.json \
+  --db data/soc.db \
+  --output output \
+  --notify \
+  --dry-run \
+  --no-dedup \
+  --pretty
+```
+
+`run_pipeline.py` is intentionally thin and delegates the real workflow to `soc.pipeline.SOCPipeline`.
+
+### Planned live Wazuh mode
+
+The next implementation phase is live Wazuh ingestion. The intended command will be:
+
+```bash
+python3 run_pipeline.py \
+  --wazuh \
+  --db data/soc.db \
+  --output output \
+  --pretty
+```
+
+The planned Wazuh flow is:
+
+```text
+Wazuh Manager API :55000  -> authentication, manager status, agent inventory
+Wazuh Indexer API :9200   -> query wazuh-alerts-* for recent alerts
+soc/wazuh_client.py       -> convert alert hits into RawEvent objects
+soc/pipeline.py           -> normalize, dedup, cluster, enrich, triage, route, report
+```
+
+Replay mode remains useful for repeatable tests and demos, but live Wazuh mode should remove the need to manually copy alerts into JSON files.
 
 ### Legacy planned entry points
 
@@ -239,9 +321,10 @@ AI_Augmented_SOC/
 │
 ├── .github/
 │   ├── workflows/
-│   │   ├── ci.yml              # pytest on push
-│   │   ├── lint.yml            # Ruff
-│   │   └── secrets.yml         # Gitleaks
+│   │   ├── ci.yml              # Ruff, pytest, and replay CLI smoke test
+│   │   ├── codeql.yml          # CodeQL static analysis
+│   │   └── secrets.yml         # Gitleaks secret scanning
+│   ├── dependabot.yml          # Weekly pip and GitHub Actions dependency updates
 │   └── ISSUE_TEMPLATE/
 │       ├── bug_report.md
 │       └── feature_request.md
@@ -254,7 +337,7 @@ AI_Augmented_SOC/
 │
 ├── assets.csv                  # Asset inventory with business context
 │
-├── run_pipeline.py             # Planned thin CLI wrapper around soc.pipeline
+├── run_pipeline.py             # CLI wrapper for replay-driven pipeline runs
 ├── run_triage.py               # Planned live polling / one-shot triage entry point
 ├── run_report.py               # Planned standalone report drafting entry point
 │
@@ -264,7 +347,7 @@ AI_Augmented_SOC/
 │   ├── models.py               # Dataclasses: Alert, RawEvent, IncidentCandidate, TriageResult, Report
 │   ├── store.py                # SQLite persistence for SOC objects and dedup keys
 │   ├── pipeline.py             # End-to-end SOC workflow orchestration
-│   ├── wazuh_client.py         # Wazuh API/index polling and parsing
+│   ├── wazuh_client.py         # Planned Wazuh Manager + Indexer client
 │   ├── security_onion_client.py # Security Onion alert/log queries
 │   ├── openrouter_client.py    # OpenRouter chat completion wrapper
 │   ├── normalizer.py           # Merge and normalize to common alert schema
@@ -310,7 +393,8 @@ AI_Augmented_SOC/
         ├── sample_so_alert.json
         ├── sample_incident_replay.json
         └── manual_events/
-            └── .gitkeep
+            ├── .gitkeep
+            └── sample_manual_incident.json
 ```
 
 ---
@@ -335,7 +419,31 @@ The current foundation is heavily unit tested. At this stage, the project valida
 | `soc/report.py` | Markdown incident report generation |
 | `soc/notifier.py` | Dry-run, SMTP, and Slack-compatible notifications |
 | `soc/pipeline.py` | End-to-end orchestration |
-```
+| `run_pipeline.py` | CLI wrapper for replay file and replay directory execution |
+---
+
+## Current phase status
+
+| Area | Status |
+|---|---|
+| Replay/manual pipeline | Working |
+| CLI replay demo | Working |
+| SQLite persistence | Working |
+| Deduplication | Working |
+| Normalization | Working for replayed Wazuh/Security Onion-shaped events |
+| Clustering | Working |
+| Local enrichment | Working |
+| Local/optional LLM triage | Working |
+| Routing | Working |
+| Markdown reports | Working |
+| Dry-run/SMTP/Slack notification layer | Working |
+| Live Wazuh Manager API client | Planned next |
+| Live Wazuh Indexer alert search | Planned next |
+| Live Security Onion client | Planned after Wazuh |
+| PDF reports | Planned polish feature |
+| Splunk/OpenBSD integrations | Later phase |
+
+The project is currently a replay-driven MVP with a working end-to-end SOC workflow. The next build phase is `soc/wazuh_client.py` and `tests/test_wazuh_client.py`.
 
 ---
 
@@ -355,6 +463,7 @@ Triage output per alert or cluster includes: score, false-positive likelihood, c
 
 ## Incident report output
 
+
 Reports are Markdown files generated from an incident candidate, triage result, routing decision, and enrichment evidence. They contain:
 
 1. Executive summary (non-technical, 3–4 sentences)
@@ -365,11 +474,13 @@ Reports are Markdown files generated from an incident candidate, triage result, 
 6. Recommended remediation
 7. Detection gaps and tuning recommendations
 
+Markdown is used as the source report format because it is easy to diff, test, review in GitHub/VS Code, and convert later. PDF export is a planned polish feature for manager/client-facing reports.
+
 ---
 
 ## Limitations
 
-- Live Wazuh and Security Onion polling clients are planned next. The current tested path is replay-driven pipeline execution.
+- Live Wazuh ingestion is planned next. The current tested path is replay-driven pipeline execution through `run_pipeline.py`.
 - Triage scoring is LLM-assisted when configured and should be treated as analyst guidance, not ground truth. Human review of queued alerts is expected.
 - Low-alert SOC environments should use replay fixtures and manual test events to validate the pipeline before relying on live alerts.
 - OpenRouter free models may have rate limits, availability limits, or model-quality variation. Use a paid or pinned model for production-like testing.
@@ -395,5 +506,24 @@ pytest tests/test_pipeline.py -v
 Run Ruff linting:
 
 ```bash
-ruff check soc tests
+ruff check soc tests run_pipeline.py
+```
+
+Run the replay CLI smoke test:
+
+```bash
+python3 run_pipeline.py \
+  --replay tests/fixtures/sample_incident_replay.json \
+  --db data/soc.db \
+  --output output \
+  --no-dedup \
+  --pretty
+```
+
+Run the full cross-platform CI locally as closely as possible:
+
+```bash
+ruff check soc tests run_pipeline.py
+pytest tests/ -v
+python3 run_pipeline.py --replay tests/fixtures/sample_incident_replay.json --db data/soc.db --output output --no-dedup --pretty
 ```
