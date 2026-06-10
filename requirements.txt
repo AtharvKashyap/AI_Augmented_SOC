@@ -4,7 +4,7 @@
 # actually used by the codebase.
 
 # Environment/config loading
-python-dotenv>=1.0.1
+python-dotenv>=1.2.2
 
 # HTTP clients for Wazuh, Security Onion, OpenRouter, and enrichment APIs
 requests>=2.34.2
