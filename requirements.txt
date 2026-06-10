@@ -7,7 +7,7 @@
 python-dotenv>=1.0.1
 
 # HTTP clients for Wazuh, Security Onion, OpenRouter, and enrichment APIs
-requests>=2.32.0
+requests>=2.34.2
 
 # Data validation and typed models
 pydantic>=2.7.0
