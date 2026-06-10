@@ -1,0 +1,49 @@
+[
+    {
+      "id": "manual-alert-001",
+      "source": "replay",
+      "timestamp": "2026-06-10T13:00:00Z",
+      "payload": {
+        "id": "manual-alert-001",
+        "timestamp": "2026-06-10T13:00:00Z",
+        "severity": "high",
+        "rule_name": "Manual test: suspicious encoded PowerShell",
+        "hostname": "lab-endpoint-01",
+        "agent_id": "lab-001",
+        "user": "student",
+        "src_ip": "10.10.10.25",
+        "dst_ip": "203.0.113.77",
+        "process_name": "powershell.exe",
+        "command_line": "powershell.exe -nop -w hidden -EncodedCommand SQBFAFgAIAAoAE4AZQB3AC0ATwBiAGoAZQBjAHQAIABOAGUAdAAuAFcAZQBiAEMAbABpAGUAbgB0ACkA",
+        "rule_groups": [
+          "manual_test",
+          "windows",
+          "powershell"
+        ],
+        "message": "Manual replay event for testing encoded PowerShell triage."
+      }
+    },
+    {
+      "id": "manual-alert-002",
+      "source": "replay",
+      "timestamp": "2026-06-10T13:01:00Z",
+      "payload": {
+        "id": "manual-alert-002",
+        "timestamp": "2026-06-10T13:01:00Z",
+        "severity": "medium",
+        "rule_name": "Manual test: outbound connection after suspicious process",
+        "hostname": "lab-endpoint-01",
+        "agent_id": "lab-001",
+        "user": "student",
+        "src_ip": "10.10.10.25",
+        "dst_ip": "203.0.113.77",
+        "dst_port": 443,
+        "rule_groups": [
+          "manual_test",
+          "network",
+          "outbound"
+        ],
+        "message": "Manual replay event for outbound HTTPS connection to suspicious test IP."
+      }
+    }
+  ]

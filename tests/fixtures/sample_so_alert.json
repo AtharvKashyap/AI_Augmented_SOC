@@ -1,0 +1,56 @@
+{
+    "id": "so-suricata-001",
+    "source": "security_onion",
+    "timestamp": "2026-06-10T12:01:15Z",
+    "payload": {
+      "event": {
+        "id": "so-suricata-001",
+        "module": "suricata",
+        "dataset": "suricata.eve",
+        "kind": "alert",
+        "category": "network"
+      },
+      "@timestamp": "2026-06-10T12:01:15Z",
+      "source": {
+        "ip": "10.0.1.42",
+        "port": 49722
+      },
+      "destination": {
+        "ip": "198.51.100.25",
+        "port": 443
+      },
+      "host": {
+        "name": "securityonion-sensor-01"
+      },
+      "network": {
+        "protocol": "tcp",
+        "transport": "tcp",
+        "direction": "outbound"
+      },
+      "suricata": {
+        "eve": {
+          "event_type": "alert",
+          "alert": {
+            "signature_id": 2024218,
+            "signature": "ET TROJAN Possible PowerShell Download Cradle",
+            "category": "Trojan Activity",
+            "severity": 1
+          },
+          "flow": {
+            "pkts_toserver": 12,
+            "pkts_toclient": 9,
+            "bytes_toserver": 1840,
+            "bytes_toclient": 5212
+          },
+          "http": {
+            "hostname": "stage-update.example.net",
+            "url": "/a/stage.ps1",
+            "http_method": "GET",
+            "status": 200,
+            "http_user_agent": "Mozilla/5.0 PowerShell"
+          }
+        }
+      },
+      "message": "ET TROJAN Possible PowerShell Download Cradle from 10.0.1.42 to 198.51.100.25"
+    }
+  }

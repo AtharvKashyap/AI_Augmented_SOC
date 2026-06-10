@@ -10,31 +10,43 @@
 
 ## What this does
 
-Security teams running Wazuh and Security Onion often need a faster way to consolidate endpoint and network evidence, even when alert volume is low. This project adds an AI-assisted layer that:
+Security teams running Wazuh and Security Onion often need a faster way to consolidate endpoint and network evidence, even when alert volume is low. This project adds a tested Python orchestration layer that can run in replay mode today and can be extended into live Wazuh / Security Onion polling as the next phase.
 
-- **Polls** Wazuh and Security Onion separately through their APIs/search backends on a configurable interval
-- **Normalizes** endpoint and network alerts into a common schema
-- **Generates testable incident candidates** from real alerts, sample fixtures, replay files, or manual test events so the system can be validated even in low-alert environments
-- **Triages** alerts or alert clusters with an OpenRouter-hosted free model: scores 1–10, estimates true/false positive likelihood, recommends an action, and explains the evidence
-- **Enriches** with optional threat intel (VirusTotal, AbuseIPDB, Shodan) and asset context
-- **Routes** alerts: page analyst now (8–10), queue for review (4–7), mark likely benign (1–3)
-- **Drafts incident reports** from alert clusters: timeline, IOCs, affected assets, remediation steps
-- **Delivers** reports via email, Markdown output, or later Splunk dashboard/webhook integration
+The current MVP foundation:
 
-No SOAR platform required. Just Python, Wazuh, Security Onion, and an OpenRouter API key. Splunk and OpenBSD `pfctl` automation are planned later, but are not required for the MVP.
+- **Loads replay events** from JSON files or directories so the pipeline can be tested even when the SOC is quiet
+- **Normalizes** Wazuh, Security Onion, and generic replay events into a common alert schema
+- **Deduplicates** raw events and alerts using a persistent SQLite-backed deduplication store
+- **Clusters** related alerts into incident candidates using shared hosts, users, source IPs, destination IPs, and rule groups
+- **Enriches** alerts and candidates with local IOC/risk-factor extraction, with VirusTotal, AbuseIPDB, and Shodan planned as optional providers
+- **Triages** alerts or incident candidates with deterministic local fallback and optional OpenRouter-backed LLM analysis
+- **Routes** triage results: page analyst now, queue for review, or mark likely benign
+- **Builds Markdown incident reports** from candidates, triage results, routing decisions, and enrichment evidence
+- **Sends notifications** through dry-run mode, SMTP email, or Slack-compatible webhooks
+- **Persists SOC objects** including raw events, alerts, incident candidates, triage results, routing decisions, and dedup keys
+
+No SOAR platform required. The MVP is intentionally modular: each SOC stage is unit tested separately, and `soc/pipeline.py` coordinates the full workflow end-to-end.
 
 ---
 
 ## Stack
 
-| Layer | Tool |
+| Layer | Tool / Module |
 |---|---|
-| Firewall / network | OpenBSD `pfctl` / `pflog` planned for later phase |
-| Network sensor | Security Onion (Suricata, Zeek) |
+| Replay / testing | JSON replay files and manual test fixtures |
 | Endpoint detection | Wazuh agents → Wazuh Manager |
-| SIEM / dashboard | Splunk planned for later phase |
-| AI triage | OpenRouter free model via OpenAI-compatible API |
-| Threat intel | VirusTotal, AbuseIPDB, Shodan |
+| Network sensor | Security Onion (Suricata, Zeek) |
+| Normalization | `soc/normalizer.py` |
+| Deduplication / persistence | SQLite via `soc/store.py` and `soc/dedup.py` |
+| Incident clustering | `soc/clustering.py` |
+| Local enrichment | `soc/enrichment.py` |
+| AI triage | OpenRouter free model via OpenAI-compatible API, with deterministic fallback |
+| Routing | `soc/router.py` |
+| Reporting | Markdown reports via `soc/report.py` |
+| Notifications | Dry-run, SMTP email, Slack-compatible webhook via `soc/notifier.py` |
+| Pipeline orchestration | `soc/pipeline.py` |
+| Firewall / network response | OpenBSD `pfctl` / `pflog` planned for later phase |
+| SIEM / dashboard output | Splunk planned for later phase |
 
 ---
 
@@ -47,12 +59,14 @@ No SOAR platform required. Just Python, Wazuh, Security Onion, and an OpenRouter
 ## Requirements
 
 - Python 3.11+
-- Wazuh Manager accessible from the SOC automation host
-- Security Onion accessible from the SOC automation host
-- OpenRouter API key: https://openrouter.ai
-- Optional: VirusTotal, AbuseIPDB, Shodan API keys for enrichment
+- `pip` and a virtual environment
+- OpenRouter API key for LLM-assisted triage: https://openrouter.ai
+- Optional: Wazuh Manager accessible from the SOC automation host
+- Optional: Security Onion accessible from the SOC automation host
 - Optional: SMTP credentials for email report delivery
-- Later phase: Splunk HEC token for alert routing back to dashboard
+- Optional: Slack-compatible webhook URL for notifications
+- Optional later enrichment providers: VirusTotal, AbuseIPDB, Shodan
+- Later phase: Splunk HEC token for dashboard/event output
 - Later phase: OpenBSD `pfctl` / `pflog` integration for firewall context and approved response actions
 
 ---
@@ -90,17 +104,20 @@ cp .env.example .env
 Required `.env` values:
 
 ```text
+OPENROUTER_API_KEY=your-openrouter-api-key
+OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
+OPENROUTER_MODEL=openrouter/free
+OPENROUTER_REPORT_MODEL=
+
+# Optional live Wazuh access
 WAZUH_HOST=https://your-wazuh-manager:55000
 WAZUH_USER=wazuh-wui
 WAZUH_PASSWORD=your-password
 
+# Optional live Security Onion access
 SECURITYONION_HOST=https://your-securityonion
 SECURITYONION_USER=your-securityonion-user
 SECURITYONION_PASSWORD=your-securityonion-password
-
-OPENROUTER_API_KEY=your-openrouter-api-key
-OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
-OPENROUTER_MODEL=openrouter/free
 ```
 
 Optional `.env` values:
@@ -126,7 +143,9 @@ EMAIL_USE_TLS=true
 
 OUTPUT_DIR=output
 LOG_DIR=logs
-DEDUP_STORE=sqlite   # sqlite or redis
+SQLITE_DB_PATH=data/soc.db
+DEDUP_TTL_HOURS=24
+DEDUP_STORE=sqlite
 REDIS_URL=redis://localhost:6379/0
 
 # Testing in low-alert environments
@@ -145,9 +164,11 @@ OPENBSD_PF_USER=
 OPENBSD_PFLOG_PATH=/var/log/pflog
 ```
 
-### 5. Add your asset inventory
+### 5. Add optional asset context
 
-Create `assets.csv` with your known assets for context enrichment:
+The current MVP does not require an asset inventory to run replay tests. Later enrichment can use a static inventory file for business context.
+
+Create `assets.csv` if you want host ownership and criticality context:
 
 ```csv
 hostname,ip,owner,criticality,internet_facing,department
@@ -160,50 +181,54 @@ fin-ws-42,10.0.1.42,Endpoint Team,High,No,Finance
 
 ## Usage
 
-### Run the triage daemon (continuous polling)
+### Run the replay pipeline
 
-```bash
-python3 run_triage.py
+Replay mode is the current safest end-to-end path. It loads JSON events, normalizes alerts, deduplicates, clusters, enriches, triages, routes, builds reports, and optionally sends notifications.
+
+Python API example:
+
+```python
+from soc.pipeline import PipelineConfig, SOCPipeline
+
+pipeline = SOCPipeline.with_sqlite_store(
+    "data/soc.db",
+    config=PipelineConfig(output_dir="output", send_notifications=False),
+)
+
+result = pipeline.run_replay_file("tests/fixtures/sample_incident_replay.json")
+print(result.to_summary())
 ```
 
-The daemon polls Wazuh and Security Onion every `POLL_INTERVAL_SECONDS`, normalizes new alerts, optionally clusters related evidence, triages them through OpenRouter, and routes the result.
+Replay directory example:
 
-### Run a one-shot triage pass
+```python
+from soc.pipeline import SOCPipeline
+
+pipeline = SOCPipeline.with_sqlite_store("data/soc.db")
+result = pipeline.run_replay_directory("tests/fixtures/manual_events")
+print(result.to_summary())
+```
+
+### Run a future CLI entry point
+
+The intended thin CLI wrapper is:
+
+```bash
+python3 run_pipeline.py --replay tests/fixtures/sample_incident_replay.json
+```
+
+`run_pipeline.py` should remain small and call `soc.pipeline.SOCPipeline`. The core workflow logic belongs in `soc/pipeline.py`.
+
+### Legacy planned entry points
+
+These scripts are still useful names for later phases, but the current orchestration layer should drive them:
 
 ```bash
 python3 run_triage.py --once
-```
-
-### Replay sample alerts for testing
-
-If your SOC does not generate many alerts, use replay fixtures to validate the pipeline without waiting for live incidents:
-
-```bash
-python3 run_triage.py --replay tests/fixtures/sample_incident_replay.json
-```
-
-You can also place manual test events in `tests/fixtures/manual_events/` and run a one-shot pass against those fixtures during development.
-
-### Draft an incident report from a closed alert cluster
-
-```bash
 python3 run_report.py --incident-id INC-20240610-001
 ```
 
-Or pass a JSON file of alert IDs:
-
-```bash
-python3 run_report.py --alerts-file incidents/inc_001_alerts.json --notes "Analyst confirmed lateral movement via RDP."
-```
-
-Reports are written to `output/` as Markdown and optionally emailed.
-
-### Command-line options
-
-```bash
-python3 run_triage.py --help
-python3 run_report.py --help
-```
+Reports are written to the configured `OUTPUT_DIR` as Markdown and can be delivered by dry-run, SMTP email, or Slack-compatible webhook notifications.
 
 ---
 
@@ -229,25 +254,28 @@ AI_Augmented_SOC/
 │
 ├── assets.csv                  # Asset inventory with business context
 │
-├── run_triage.py               # Entry point: polling daemon, one-shot, or replay mode
-├── run_report.py               # Entry point: report drafting
+├── run_pipeline.py             # Planned thin CLI wrapper around soc.pipeline
+├── run_triage.py               # Planned live polling / one-shot triage entry point
+├── run_report.py               # Planned standalone report drafting entry point
 │
 ├── soc/                        # Core package
 │   ├── __init__.py
 │   ├── config.py               # .env loading, constants
+│   ├── models.py               # Dataclasses: Alert, RawEvent, IncidentCandidate, TriageResult, Report
+│   ├── store.py                # SQLite persistence for SOC objects and dedup keys
+│   ├── pipeline.py             # End-to-end SOC workflow orchestration
 │   ├── wazuh_client.py         # Wazuh API/index polling and parsing
 │   ├── security_onion_client.py # Security Onion alert/log queries
 │   ├── openrouter_client.py    # OpenRouter chat completion wrapper
 │   ├── normalizer.py           # Merge and normalize to common alert schema
 │   ├── clustering.py           # Group related alerts into incident candidates
 │   ├── dedup.py                # SQLite / Redis deduplication store
-│   ├── enrichment.py           # VirusTotal, AbuseIPDB, Shodan lookups
-│   ├── triage.py               # LLM triage call: score, classify, summarize
-│   ├── router.py               # Route alert by score: page / queue / likely-benign
-│   ├── report.py               # LLM report drafting from alert cluster
+│   ├── enrichment.py           # Local IOC/risk-factor extraction; external TI providers later
+│   ├── triage.py               # Local + OpenRouter triage: score, classify, summarize
+│   ├── router.py               # Route by score/action: page / queue / likely-benign
+│   ├── report.py               # Markdown incident report generation
 │   ├── replay.py               # Sample/manual alert replay for testing low-alert SOCs
-│   ├── notifier.py             # Email delivery; Splunk HEC later
-│   └── models.py               # Dataclasses: Alert, IncidentCandidate, TriageResult, Incident, Report
+│   └── notifier.py             # Dry-run, SMTP email, Slack-compatible webhook delivery
 │
 ├── prompts/
 │   ├── triage_prompt.txt       # Triage system prompt (externalized)
@@ -261,20 +289,52 @@ AI_Augmented_SOC/
 │
 └── tests/
     ├── __init__.py
-    ├── test_wazuh_client.py
-    ├── test_security_onion_client.py
-    ├── test_normalizer.py
+    ├── test_models.py
+    ├── test_config.py
+    ├── test_store.py
     ├── test_dedup.py
+    ├── test_replay.py
+    ├── test_normalizer.py
+    ├── test_clustering.py
     ├── test_enrichment.py
+    ├── test_openrouter_client.py
     ├── test_triage.py
     ├── test_router.py
     ├── test_report.py
+    ├── test_notifier.py
+    ├── test_pipeline.py
+    ├── test_wazuh_client.py              # planned / next phase
+    ├── test_security_onion_client.py     # planned / next phase
     └── fixtures/
         ├── sample_wazuh_alert.json
         ├── sample_so_alert.json
         ├── sample_incident_replay.json
         └── manual_events/
             └── .gitkeep
+```
+
+---
+
+## Current tested modules
+
+The current foundation is heavily unit tested. At this stage, the project validates the core SOC logic before adding live integrations:
+
+| Module | Purpose |
+|---|---|
+| `soc/models.py` | Shared dataclasses and enums |
+| `soc/config.py` | Environment loading and validation |
+| `soc/store.py` | SQLite persistence |
+| `soc/dedup.py` | Duplicate raw event / alert suppression |
+| `soc/replay.py` | Replay file and directory loading |
+| `soc/normalizer.py` | Wazuh, Security Onion, and generic alert normalization |
+| `soc/clustering.py` | Alert grouping into incident candidates |
+| `soc/enrichment.py` | Local IOC and risk-factor enrichment |
+| `soc/openrouter_client.py` | OpenRouter-compatible chat completion wrapper |
+| `soc/triage.py` | Local and LLM-assisted triage |
+| `soc/router.py` | Triage-to-action routing |
+| `soc/report.py` | Markdown incident report generation |
+| `soc/notifier.py` | Dry-run, SMTP, and Slack-compatible notifications |
+| `soc/pipeline.py` | End-to-end orchestration |
 ```
 
 ---
@@ -295,7 +355,7 @@ Triage output per alert or cluster includes: score, false-positive likelihood, c
 
 ## Incident report output
 
-Reports are Markdown files containing:
+Reports are Markdown files generated from an incident candidate, triage result, routing decision, and enrichment evidence. They contain:
 
 1. Executive summary (non-technical, 3–4 sentences)
 2. Incident timeline (chronological with timestamps)
@@ -309,13 +369,14 @@ Reports are Markdown files containing:
 
 ## Limitations
 
-- Triage scoring is LLM-assisted and should be treated as analyst guidance, not ground truth. Human review of queued alerts is expected.
+- Live Wazuh and Security Onion polling clients are planned next. The current tested path is replay-driven pipeline execution.
+- Triage scoring is LLM-assisted when configured and should be treated as analyst guidance, not ground truth. Human review of queued alerts is expected.
 - Low-alert SOC environments should use replay fixtures and manual test events to validate the pipeline before relying on live alerts.
 - OpenRouter free models may have rate limits, availability limits, or model-quality variation. Use a paid or pinned model for production-like testing.
-- Enrichment depends on third-party API rate limits (VirusTotal, AbuseIPDB, Shodan).
-- Automated response actions such as OpenBSD `pfctl` blocks or Wazuh active response are not included in this version — see `PLAN.md` later phases.
+- External enrichment providers such as VirusTotal, AbuseIPDB, and Shodan are planned as optional additions. Current enrichment is local and deterministic.
+- Automated response actions such as OpenBSD `pfctl` blocks or Wazuh active response are not included in this version.
 - Splunk ingestion and dashboards are planned later and are not required for the MVP.
-- Asset inventory is a static CSV. CMDB or EDR integration is a future milestone.
+- Asset inventory is optional and static. CMDB or EDR inventory integration is a future milestone.
 
 ---
 
@@ -323,4 +384,16 @@ Reports are Markdown files containing:
 
 ```bash
 pytest tests/ -v
+```
+
+Run a focused module test:
+
+```bash
+pytest tests/test_pipeline.py -v
+```
+
+Run Ruff linting:
+
+```bash
+ruff check soc tests
 ```
