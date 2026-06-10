@@ -16,4 +16,4 @@ pydantic>=2.7.0
 pytest>=8.2.0
 
 # Linting / code quality
-ruff>=0.5.0
+ruff>=0.15.16
