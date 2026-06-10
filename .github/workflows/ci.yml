@@ -1,15 +1,18 @@
 # GitHub Actions workflow: CI
 #
 # Purpose:
-#   Runs the Python test suite on every push and pull request.
+#   Runs linting, unit tests, and a replay CLI smoke test on Linux, macOS, and Windows.
 #
 # What it checks:
 #   - Dependencies install successfully
+#   - Ruff linting passes
 #   - Unit tests pass with pytest
+#   - The replay-driven pipeline CLI runs successfully
+#   - A report artifact can be generated from sample replay data
 #
 # Notes:
-#   This workflow is intentionally small for the MVP. As the project grows,
-#   add coverage reporting, integration tests, and fixture replay tests here.
+#   This workflow avoids live Wazuh, Security Onion, OpenRouter, SMTP, and Slack
+#   dependencies. It only validates the local replay-driven MVP path.
 
 name: CI
 
@@ -19,10 +22,24 @@ on:
   pull_request:
     branches: ["main"]
 
+permissions:
+  contents: read
+
 jobs:
   test:
-    name: Run pytest
-    runs-on: ubuntu-latest
+    name: Python ${{ matrix.python-version }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+        python-version:
+          - "3.11"
+          - "3.12"
 
     steps:
       - name: Check out repository
@@ -31,13 +48,33 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python-version }}
+          cache: "pip"
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          pip install ruff pytest
 
-      - name: Run tests
+      - name: Run Ruff linting
+        run: |
+          ruff check soc tests run_pipeline.py
+
+      - name: Run unit tests
         run: |
           pytest tests/ -v
+
+      - name: Run replay CLI smoke test
+        shell: bash
+        run: python run_pipeline.py --replay tests/fixtures/sample_incident_replay.json --db data/soc.db --output output --no-dedup --pretty
+
+      - name: Upload generated report artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reports-${{ matrix.os }}-py${{ matrix.python-version }}
+          path: |
+            output/
+            data/soc.db
+          if-no-files-found: ignore
