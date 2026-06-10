@@ -14,8 +14,6 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-import pytest
-
 from soc.models import AlertSeverity, EventSource, RawEvent
 from soc.normalizer import (
     Normalizer,
