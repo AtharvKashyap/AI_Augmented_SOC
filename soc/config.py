@@ -1,5 +1,3 @@
-
-
 """Configuration loading for AI_Augmented_SOC.
 
 This module is responsible for reading environment variables from `.env` and
@@ -20,7 +18,7 @@ Typical usage:
     from soc.config import get_settings
 
     settings = get_settings()
-    print(settings.wazuh_host)
+    print(settings.wazuh_manager_url)
 """
 
 from __future__ import annotations
@@ -56,9 +54,18 @@ class Settings:
     log_dir: Path
 
     # Wazuh settings
-    wazuh_host: str
-    wazuh_user: str
-    wazuh_password: str
+    wazuh_manager_url: str
+    wazuh_manager_user: str
+    wazuh_manager_password: str
+    wazuh_manager_verify_tls: bool
+    # Deprecated/optional Indexer fields kept for backward-compatible loading.
+    wazuh_indexer_url: str
+    wazuh_indexer_user: str
+    wazuh_indexer_password: str
+    wazuh_indexer_verify_tls: bool
+    wazuh_alert_index: str
+    wazuh_alert_limit: int
+    wazuh_alert_lookback_minutes: int
     wazuh_min_level: int
     wazuh_alert_source: str
     wazuh_alert_json_path: Path
@@ -136,7 +143,7 @@ class Settings:
         self.manual_test_events_dir.mkdir(parents=True, exist_ok=True)
 
     def validate_wazuh(self) -> None:
-        """Validate that required Wazuh settings are present.
+        """Validate required Wazuh settings for the selected alert source.
 
         Inputs:
             None. Uses Wazuh fields from this settings object.
@@ -145,12 +152,51 @@ class Settings:
             None.
 
         Raises:
-            ConfigError: If a required Wazuh setting is missing.
+            ConfigError: If a required Wazuh setting is missing or invalid.
         """
 
-        _require_non_empty("WAZUH_HOST", self.wazuh_host)
-        _require_non_empty("WAZUH_USER", self.wazuh_user)
-        _require_non_empty("WAZUH_PASSWORD", self.wazuh_password)
+        if self.wazuh_alert_source == "json_logs":
+            self.validate_wazuh_json_logs()
+            return
+
+        raise ConfigError(
+            "Unsupported Wazuh alert source: "
+            f"{self.wazuh_alert_source}. Supported value: json_logs"
+        )
+
+    def validate_wazuh_json_logs(self) -> None:
+        """Validate Wazuh alerts.json settings required for live ingestion.
+
+        Inputs:
+            None. Uses Wazuh alerts.json fields from this settings object.
+
+        Outputs:
+            None.
+
+        Raises:
+            ConfigError: If a required alerts.json setting is missing.
+        """
+
+        if self.wazuh_alert_json_path == Path(""):
+            raise ConfigError("Missing required environment variable: WAZUH_ALERT_JSON_PATH")
+
+
+    def validate_wazuh_manager(self) -> None:
+        """Validate only the Wazuh Manager settings required for agent context.
+
+        Inputs:
+            None. Uses Wazuh Manager fields from this settings object.
+
+        Outputs:
+            None.
+
+        Raises:
+            ConfigError: If a required Wazuh Manager setting is missing.
+        """
+
+        _require_non_empty("WAZUH_MANAGER_URL", self.wazuh_manager_url)
+        _require_non_empty("WAZUH_MANAGER_USER", self.wazuh_manager_user)
+        _require_non_empty("WAZUH_MANAGER_PASSWORD", self.wazuh_manager_password)
 
     def validate_security_onion(self) -> None:
         """Validate that required Security Onion settings are present.
@@ -256,6 +302,24 @@ class Settings:
 
         return self.openrouter_report_model or self.openrouter_model
 
+    @property
+    def wazuh_host(self) -> str:
+        """Backward-compatible alias for the Wazuh Manager URL."""
+
+        return self.wazuh_manager_url
+
+    @property
+    def wazuh_user(self) -> str:
+        """Backward-compatible alias for the Wazuh Manager username."""
+
+        return self.wazuh_manager_user
+
+    @property
+    def wazuh_password(self) -> str:
+        """Backward-compatible alias for the Wazuh Manager password."""
+
+        return self.wazuh_manager_password
+
 
 _cached_settings: Settings | None = None
 
@@ -299,11 +363,26 @@ def _load_settings_from_env() -> Settings:
         alert_lookback_minutes=_get_int("ALERT_LOOKBACK_MINUTES", 5, minimum=1),
         output_dir=_get_path("OUTPUT_DIR", "output"),
         log_dir=_get_path("LOG_DIR", "logs"),
-        wazuh_host=_get_str("WAZUH_HOST", ""),
-        wazuh_user=_get_str("WAZUH_USER", ""),
-        wazuh_password=_get_str("WAZUH_PASSWORD", ""),
+        wazuh_manager_url=_get_str("WAZUH_MANAGER_URL", _get_str("WAZUH_HOST", "")),
+        wazuh_manager_user=_get_str("WAZUH_MANAGER_USER", _get_str("WAZUH_USER", "")),
+        wazuh_manager_password=_get_str(
+            "WAZUH_MANAGER_PASSWORD",
+            _get_str("WAZUH_PASSWORD", ""),
+        ),
+        wazuh_manager_verify_tls=_get_bool("WAZUH_MANAGER_VERIFY_TLS", True),
+        wazuh_indexer_url=_get_str("WAZUH_INDEXER_URL", ""),
+        wazuh_indexer_user=_get_str("WAZUH_INDEXER_USER", ""),
+        wazuh_indexer_password=_get_str("WAZUH_INDEXER_PASSWORD", ""),
+        wazuh_indexer_verify_tls=_get_bool("WAZUH_INDEXER_VERIFY_TLS", True),
+        wazuh_alert_index=_get_str("WAZUH_ALERT_INDEX", "wazuh-alerts-*"),
+        wazuh_alert_limit=_get_int("WAZUH_ALERT_LIMIT", 100, minimum=1),
+        wazuh_alert_lookback_minutes=_get_int(
+            "WAZUH_ALERT_LOOKBACK_MINUTES",
+            _get_int("ALERT_LOOKBACK_MINUTES", 5, minimum=1),
+            minimum=1,
+        ),
         wazuh_min_level=_get_int("WAZUH_MIN_LEVEL", 7, minimum=0),
-        wazuh_alert_source=_get_str("WAZUH_ALERT_SOURCE", "api"),
+        wazuh_alert_source=_get_str("WAZUH_ALERT_SOURCE", "json_logs"),
         wazuh_alert_json_path=_get_path(
             "WAZUH_ALERT_JSON_PATH",
             "/var/ossec/logs/alerts/alerts.json",

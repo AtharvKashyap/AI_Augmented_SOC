@@ -1,10 +1,9 @@
-
-
 """Tests for the run_pipeline CLI wrapper.
 
-The CLI should stay thin: parse arguments, construct the pipeline, run a replay
-source, and print a JSON summary. These tests mock settings and pipeline
-construction so no real database, LLM, SMTP, or Slack calls are required.
+The CLI should stay thin: parse arguments, construct the pipeline, run a selected
+event source, and print a JSON summary. These tests mock settings, pipeline
+construction, and Wazuh clients so no real database, LLM, SMTP, Slack, or Wazuh
+calls are required.
 """
 
 from __future__ import annotations
@@ -21,6 +20,7 @@ import run_pipeline
 from run_pipeline import CliError, build_parser, main, run_from_args
 from soc.config import ConfigError
 from soc.pipeline import PipelineError
+from soc.wazuh_client import WazuhError
 
 
 @dataclass(slots=True)
@@ -38,6 +38,9 @@ class FakeSettings:
     email_to: str = ""
     email_use_tls: bool = True
     slack_webhook_url: str = ""
+    wazuh_alert_lookback_minutes: int = 5
+    wazuh_min_level: int = 7
+    wazuh_alert_limit: int = 100
 
 
 @dataclass(slots=True)
@@ -56,7 +59,7 @@ class FakeRunResult:
     """Fake pipeline run result."""
 
     source_type: str
-    source_path: Path
+    source_path: Path | None
     report_paths: list[Path]
 
     def to_summary(self) -> dict[str, Any]:
@@ -70,7 +73,7 @@ class FakeRunResult:
             "reports": len(self.report_paths),
             "errors": [],
             "source_type": self.source_type,
-            "source_path": str(self.source_path),
+            "source_path": str(self.source_path) if self.source_path is not None else None,
         }
 
 
@@ -101,6 +104,7 @@ class FakeSOCPipeline:
         self.notifier = notifier
         self.replay_file_calls: list[Path] = []
         self.replay_directory_calls: list[Path] = []
+        self.run_events_calls: list[list[Any]] = []
         FakeSOCPipeline.last_instance = self
 
     @classmethod
@@ -128,6 +132,51 @@ class FakeSOCPipeline:
         self.replay_directory_calls.append(path)
         return FakeRunResult("directory", path, [self.config.output_dir / "candidate-001.md"])
 
+    def run_events(self, events: list[Any]) -> FakeRunResult:
+        """Record direct event execution call."""
+
+        self.run_events_calls.append(events)
+        return FakeRunResult("wazuh", None, [self.config.output_dir / "candidate-001.md"])
+
+
+class FakeWazuhClient:
+    """Fake WazuhClient factory target."""
+
+    settings_calls: list[FakeSettings] = []
+    last_instance: FakeWazuhClient | None = None
+    events_to_return: list[Any] = [{"id": "wazuh-event-001"}]
+
+    def __init__(self) -> None:
+        """Initialize fake Wazuh client."""
+
+        self.fetch_calls: list[dict[str, int]] = []
+        FakeWazuhClient.last_instance = self
+
+    @classmethod
+    def from_settings(cls, settings: FakeSettings) -> FakeWazuhClient:
+        """Record settings used to build Wazuh client."""
+
+        cls.settings_calls.append(settings)
+        return cls()
+
+    def fetch_recent_events(
+        self,
+        *,
+        lookback_minutes: int,
+        min_level: int,
+        limit: int,
+    ) -> list[Any]:
+        """Return fake Wazuh events."""
+
+        self.fetch_calls.append(
+            {
+                "lookback_minutes": lookback_minutes,
+                "min_level": min_level,
+                "limit": limit,
+            }
+        )
+        return self.events_to_return
+
 
 def _reset_fakes() -> None:
     """Reset fake class call history."""
@@ -135,6 +184,9 @@ def _reset_fakes() -> None:
     FakeNotifierDispatcher.calls.clear()
     FakeSOCPipeline.created.clear()
     FakeSOCPipeline.last_instance = None
+    FakeWazuhClient.settings_calls.clear()
+    FakeWazuhClient.last_instance = None
+    FakeWazuhClient.events_to_return = [{"id": "wazuh-event-001"}]
 
 
 def _settings(tmp_path: Path) -> FakeSettings:
@@ -154,6 +206,7 @@ def _patch_cli_dependencies(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> 
     monkeypatch.setattr(run_pipeline, "PipelineConfig", FakePipelineConfig)
     monkeypatch.setattr(run_pipeline, "NotificationDispatcher", FakeNotifierDispatcher)
     monkeypatch.setattr(run_pipeline, "SOCPipeline", FakeSOCPipeline)
+    monkeypatch.setattr(run_pipeline, "WazuhClient", FakeWazuhClient)
     monkeypatch.setattr(run_pipeline, "get_settings", lambda env_file, reload: settings)
     return settings
 
@@ -164,6 +217,7 @@ def _args(**overrides: Any) -> argparse.Namespace:
     values = {
         "replay": None,
         "replay_dir": None,
+        "wazuh": False,
         "env_file": Path(".env"),
         "db": None,
         "output": None,
@@ -186,6 +240,7 @@ def test_build_parser_accepts_replay_file(tmp_path):
 
     assert args.replay == replay_path
     assert args.replay_dir is None
+    assert args.wazuh is False
     assert args.env_file == Path(".env")
     assert args.notify is False
     assert args.dry_run is False
@@ -199,19 +254,30 @@ def test_build_parser_accepts_replay_directory(tmp_path):
 
     assert args.replay is None
     assert args.replay_dir == replay_dir
+    assert args.wazuh is False
     assert args.notify is True
     assert args.dry_run is True
 
 
-def test_build_parser_requires_one_replay_source():
-    """Parser should require replay file or replay directory."""
+def test_build_parser_accepts_wazuh_mode():
+    """Parser should accept Wazuh mode."""
+
+    args = build_parser().parse_args(["--wazuh"])
+
+    assert args.replay is None
+    assert args.replay_dir is None
+    assert args.wazuh is True
+
+
+def test_build_parser_requires_one_source():
+    """Parser should require exactly one source."""
 
     with pytest.raises(SystemExit):
         build_parser().parse_args([])
 
 
-def test_build_parser_rejects_multiple_replay_sources(tmp_path):
-    """Parser should reject replay file and replay directory together."""
+def test_build_parser_rejects_multiple_sources(tmp_path):
+    """Parser should reject multiple source modes together."""
 
     with pytest.raises(SystemExit):
         build_parser().parse_args(
@@ -220,6 +286,14 @@ def test_build_parser_rejects_multiple_replay_sources(tmp_path):
                 str(tmp_path / "replay.json"),
                 "--replay-dir",
                 str(tmp_path / "replay"),
+            ]
+        )
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(
+            [
+                "--replay",
+                str(tmp_path / "replay.json"),
+                "--wazuh",
             ]
         )
 
@@ -234,6 +308,7 @@ def test_run_from_args_runs_replay_file_with_defaults(monkeypatch, tmp_path):
     summary = run_from_args(_args(replay=replay_path))
 
     assert summary["source_type"] == "file"
+    assert summary["source_mode"] == "replay"
     assert summary["source_path"] == str(replay_path)
     assert summary["db_path"] == str(settings.sqlite_db_path)
     assert summary["output_dir"] == str(settings.output_dir)
@@ -262,9 +337,38 @@ def test_run_from_args_runs_replay_directory(monkeypatch, tmp_path):
     summary = run_from_args(_args(replay_dir=replay_dir))
 
     assert summary["source_type"] == "directory"
+    assert summary["source_mode"] == "replay_dir"
     assert summary["source_path"] == str(replay_dir)
     assert FakeSOCPipeline.last_instance is not None
     assert FakeSOCPipeline.last_instance.replay_directory_calls == [replay_dir]
+
+
+def test_run_from_args_runs_wazuh_mode(monkeypatch, tmp_path):
+    """run_from_args should fetch Wazuh events and run them through the pipeline."""
+
+    settings = _patch_cli_dependencies(monkeypatch, tmp_path)
+    settings.wazuh_alert_lookback_minutes = 15
+    settings.wazuh_min_level = 10
+    settings.wazuh_alert_limit = 250
+    FakeWazuhClient.events_to_return = [{"id": "wazuh-event-001"}]
+
+    summary = run_from_args(_args(wazuh=True))
+
+    assert summary["source_type"] == "wazuh"
+    assert summary["source_mode"] == "wazuh"
+    assert summary["source_path"] is None
+    assert summary["reports_written"] == [str(settings.output_dir / "candidate-001.md")]
+    assert FakeWazuhClient.settings_calls == [settings]
+    assert FakeWazuhClient.last_instance is not None
+    assert FakeWazuhClient.last_instance.fetch_calls == [
+        {
+            "lookback_minutes": 15,
+            "min_level": 10,
+            "limit": 250,
+        }
+    ]
+    assert FakeSOCPipeline.last_instance is not None
+    assert FakeSOCPipeline.last_instance.run_events_calls == [[{"id": "wazuh-event-001"}]]
 
 
 def test_run_from_args_honors_cli_overrides(monkeypatch, tmp_path):
@@ -425,6 +529,22 @@ def test_main_returns_one_for_pipeline_error(monkeypatch, tmp_path, capsys):
     captured = capsys.readouterr()
     assert exit_code == 1
     assert "error: pipeline failed" in captured.err
+
+
+def test_main_returns_one_for_wazuh_error(monkeypatch, tmp_path, capsys):
+    """main should return one for WazuhError."""
+
+    monkeypatch.setattr(
+        run_pipeline,
+        "run_from_args",
+        lambda args: (_ for _ in ()).throw(WazuhError("wazuh failed")),
+    )
+
+    exit_code = main(["--wazuh"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "error: wazuh failed" in captured.err
 
 
 def test_main_returns_130_for_keyboard_interrupt(monkeypatch, tmp_path, capsys):
