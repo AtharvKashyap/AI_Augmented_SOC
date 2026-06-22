@@ -13,7 +13,7 @@ requests>=2.34.2
 pydantic>=2.13.4
 
 # Testing
-pytest>=9.0.3
+pytest>=9.1.1
 
 # Linting / code quality
 ruff>=0.15.16
