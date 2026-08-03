@@ -30,6 +30,12 @@ python3 run_pipeline.py --wazuh --db data/wazuh_test.db --output output --pretty
 
 Add `--no-llm` to any run to force deterministic local triage regardless of `OPENROUTER_API_KEY`. Check `triage_mode` and `local_fallbacks` in the JSON summary to see which engine actually scored the run.
 
+Security Onion mode (Connect API — **requires a Security Onion Pro licence**):
+
+```bash
+python3 run_pipeline.py --security-onion --output output --pretty
+```
+
 Continuous polling (Milestone 1.6):
 
 ```bash
@@ -78,6 +84,17 @@ Things that only become clear after reading several files:
 Several vars have legacy aliases (`WAZUH_MANAGER_URL` falls back to `WAZUH_HOST`, etc.) and `.env.example` documents every key, including ones for not-yet-built phases (Splunk HEC, OpenBSD pf, enrichment providers).
 
 Config tests write a throwaway `.env.test` under `tmp_path` and `monkeypatch.delenv` the keys under test — real env vars leak into `get_settings` otherwise.
+
+### Security Onion ingestion
+
+`soc/security_onion_client.py` targets the **Connect API**, which is a Security Onion **Pro-licence** feature — without one it cannot authenticate.
+
+- Auth is OAuth2 client credentials: `POST /oauth2/token` with HTTP Basic auth and `grant_type=client_credentials`, yielding a bearer token cached until shortly before `expires_in` elapses. Configured via `SECURITYONION_CLIENT_ID` / `SECURITYONION_CLIENT_SECRET`, **not** the console username and password (which remain in `Settings` unused by this client).
+- Events come from `GET /connect/query/data`.
+- **Several query parameters are inferred, not documented.** Security Onion does not publish the time-range, limit, timezone, or date-format parameter names for that endpoint. Every inferred name and value lives only as a `SecurityOnionConfig` field (`range_param`, `zone_param`, `format_param`, `limit_param` defaulting to `eventLimit`, plus `zone`, `date_format`, `range_datetime_format`, `range_separator`, and the `query` index pattern). Never hardcode one at a call site — when a real grid disagrees, it should be a one-line change in that dataclass.
+- Because those params may be ignored by a real grid, severity and lookback filtering are **re-applied locally** after the query. Don't remove that as redundant.
+- Severity is compared through `severity_from_security_onion`, not numerically, because Suricata numbers severity *downwards*. With `SO_MIN_SEVERITY=2`, severities 1–2 are kept and 3+ dropped; documents with no interpretable severity are kept rather than silently dropped.
+- `extract_event_documents` tolerates three response shapes (`events`, `data.events`, Elasticsearch `hits.hits[]._source`) and returns nothing plus a warning naming the received keys for anything else.
 
 ### Wazuh ingestion
 

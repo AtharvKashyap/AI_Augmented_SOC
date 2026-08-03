@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import time
 from dataclasses import asdict, is_dataclass
 from typing import Any, Protocol
@@ -51,6 +52,8 @@ from soc.models import (
 )
 from soc.openrouter_client import OpenRouterError, parse_json_response_text
 
+
+logger = logging.getLogger(__name__)
 
 JsonDict = dict[str, Any]
 
@@ -128,6 +131,9 @@ class TriageEngine:
         temperature: LLM sampling temperature.
         allow_fallback: If True, malformed/failed LLM output falls back to local
             deterministic triage instead of raising.
+        max_json_retries: Extra attempts when a response cannot be parsed into a
+            TriageResult. Transport failures are not retried here; the client
+            already retries those with backoff.
     """
 
     def __init__(
@@ -138,6 +144,7 @@ class TriageEngine:
         max_tokens: int = 800,
         temperature: float = 0.1,
         allow_fallback: bool = True,
+        max_json_retries: int = 1,
     ) -> None:
         """Initialize the triage engine.
 
@@ -147,6 +154,7 @@ class TriageEngine:
             max_tokens: Maximum LLM output tokens.
             temperature: LLM sampling temperature.
             allow_fallback: Whether local fallback is allowed on LLM failure.
+            max_json_retries: Extra attempts on an unparseable response.
 
         Outputs:
             None.
@@ -156,12 +164,15 @@ class TriageEngine:
             raise TriageError("max_tokens must be greater than zero")
         if temperature < 0:
             raise TriageError("temperature cannot be negative")
+        if max_json_retries < 0:
+            raise TriageError("max_json_retries cannot be negative")
 
         self.llm_client = llm_client
         self.model = model
         self.max_tokens = max_tokens
         self.temperature = temperature
         self.allow_fallback = allow_fallback
+        self.max_json_retries = max_json_retries
 
     def triage_alert(self, alert: Alert, enrichments: list[EnrichmentResult] | None = None) -> TriageResult:
         """Triage one normalized alert.
@@ -247,24 +258,65 @@ class TriageEngine:
             return fallback_result
 
         prompt = build_triage_prompt(target_payload)
-        started_at = time.perf_counter()
-        try:
-            response_text, model_name, token_usage = self._invoke_llm(prompt)
+        attempts = self.max_json_retries + 1
+
+        for attempt in range(1, attempts + 1):
+            started_at = time.perf_counter()
+            try:
+                response_text, model_name, token_usage = self._invoke_llm(prompt)
+            except OpenRouterError as exc:
+                # Transport failures are already retried inside the client with
+                # backoff. Retrying here as well would multiply the wait on a
+                # rate-limited model for no extra chance of success.
+                return self._fallback_or_raise(fallback_result, exc)
+
             latency_ms = int((time.perf_counter() - started_at) * 1000)
-            parsed = parse_json_response_text(response_text)
-            return triage_result_from_llm_json(
-                parsed,
-                target_id=target_id,
-                target_type=target_type,
-                model=model_name,
-                latency_ms=latency_ms,
-                token_usage=token_usage,
-                prompt_version=TRIAGE_PROMPT_VERSION,
-            )
-        except (OpenRouterError, TriageError, KeyError, TypeError, ValueError) as exc:
-            if not self.allow_fallback:
-                raise TriageError(f"LLM triage failed: {exc}") from exc
-            return fallback_result
+            try:
+                parsed = parse_json_response_text(response_text)
+                return triage_result_from_llm_json(
+                    parsed,
+                    target_id=target_id,
+                    target_type=target_type,
+                    model=model_name,
+                    latency_ms=latency_ms,
+                    token_usage=token_usage,
+                    prompt_version=TRIAGE_PROMPT_VERSION,
+                )
+            except (OpenRouterError, TriageError, KeyError, TypeError, ValueError) as exc:
+                # An unparseable response is worth one more try: free models
+                # often wrap or truncate JSON, and dropping straight to local
+                # scoring discards the model's judgment entirely.
+                if attempt < attempts:
+                    logger.warning(
+                        "LLM triage response was unusable for %s (attempt %d of %d): %s",
+                        target_id,
+                        attempt,
+                        attempts,
+                        exc,
+                    )
+                    continue
+                return self._fallback_or_raise(fallback_result, exc)
+
+        return fallback_result
+
+    def _fallback_or_raise(self, fallback_result: TriageResult, exc: Exception) -> TriageResult:
+        """Return the local fallback, or raise when fallback is disabled.
+
+        Inputs:
+            fallback_result: Deterministic local result.
+            exc: Error that ended the LLM attempt.
+
+        Outputs:
+            The fallback TriageResult, labelled as locally scored.
+
+        Raises:
+            TriageError: If fallback is not allowed.
+        """
+
+        if not self.allow_fallback:
+            raise TriageError(f"LLM triage failed: {exc}") from exc
+        logger.warning("Falling back to local triage: %s", exc)
+        return fallback_result
 
     def _invoke_llm(self, prompt: str) -> tuple[str, str | None, JsonDict]:
         """Call the configured LLM client and collect provenance metadata.

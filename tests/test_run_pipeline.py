@@ -177,6 +177,33 @@ class FakeSOCPipeline:
         return FakeRunResult("wazuh", None, [self.config.output_dir / "candidate-001.md"])
 
 
+class FakeSecurityOnionClient:
+    """Fake SecurityOnionClient factory target."""
+
+    settings_calls: list[FakeSettings] = []
+    last_instance: FakeSecurityOnionClient | None = None
+    events_to_return: list[Any] = [{"id": "so-event-001"}]
+
+    def __init__(self) -> None:
+        """Initialize fake Security Onion client."""
+
+        self.fetch_calls = 0
+        FakeSecurityOnionClient.last_instance = self
+
+    @classmethod
+    def from_settings(cls, settings: FakeSettings) -> FakeSecurityOnionClient:
+        """Record settings used to build the client."""
+
+        cls.settings_calls.append(settings)
+        return cls()
+
+    def fetch_recent_events(self) -> list[Any]:
+        """Return fake Security Onion events."""
+
+        self.fetch_calls += 1
+        return list(FakeSecurityOnionClient.events_to_return)
+
+
 class FakeWazuhClient:
     """Fake WazuhClient factory target."""
 
@@ -222,6 +249,9 @@ class FakeWazuhClient:
 def _reset_fakes() -> None:
     """Reset fake class call history."""
 
+    FakeSecurityOnionClient.settings_calls.clear()
+    FakeSecurityOnionClient.last_instance = None
+
     FakeNotifierDispatcher.calls.clear()
     FakeSOCPipeline.created.clear()
     FakeSOCPipeline.last_instance = None
@@ -250,6 +280,7 @@ def _patch_cli_dependencies(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> 
     monkeypatch.setattr(run_pipeline, "NotificationDispatcher", FakeNotifierDispatcher)
     monkeypatch.setattr(run_pipeline, "SOCPipeline", FakeSOCPipeline)
     monkeypatch.setattr(run_pipeline, "WazuhClient", FakeWazuhClient)
+    monkeypatch.setattr(run_pipeline, "SecurityOnionClient", FakeSecurityOnionClient)
     monkeypatch.setattr(run_pipeline, "get_settings", lambda env_file, reload: settings)
     # Daemon cycles must not spend real wall-clock time in CI.
     monkeypatch.setattr("soc.daemon.time.sleep", lambda _seconds: None)
@@ -263,6 +294,7 @@ def _args(**overrides: Any) -> argparse.Namespace:
         "replay": None,
         "replay_dir": None,
         "wazuh": False,
+        "security_onion": False,
         "env_file": Path(".env"),
         "db": None,
         "output": None,
@@ -944,3 +976,42 @@ def test_wazuh_daemon_mode_processes_each_alert_exactly_once(monkeypatch, tmp_pa
     assert first["events_processed"] == 1
     assert second["events_processed"] == 1
     assert second["cycles_failed"] == 0
+
+
+def test_build_parser_accepts_security_onion_source():
+    """Security Onion must be selectable as an ingestion source."""
+
+    args = build_parser().parse_args(["--security-onion"])
+
+    assert args.security_onion is True
+
+
+def test_build_parser_rejects_security_onion_combined_with_wazuh():
+    """Sources stay mutually exclusive so one run has one provenance."""
+
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["--wazuh", "--security-onion"])
+
+
+def test_run_from_args_runs_security_onion_mode(monkeypatch, tmp_path):
+    """Security Onion mode must fetch events and run them through the pipeline."""
+
+    settings = _patch_cli_dependencies(monkeypatch, tmp_path)
+
+    summary = run_from_args(_args(security_onion=True))
+
+    assert FakeSecurityOnionClient.settings_calls == [settings]
+    assert FakeSecurityOnionClient.last_instance.fetch_calls == 1
+    assert FakeSOCPipeline.last_instance.run_events_calls == [[{"id": "so-event-001"}]]
+    assert summary["source_mode"] == "security_onion"
+
+
+def test_run_from_args_security_onion_daemon_builds_client_once(monkeypatch, tmp_path):
+    """The client is reused across cycles so its bearer token survives."""
+
+    _patch_cli_dependencies(monkeypatch, tmp_path)
+
+    run_from_args(_args(security_onion=True, daemon=True, poll_interval=1, max_cycles=3))
+
+    assert len(FakeSecurityOnionClient.settings_calls) == 1
+    assert FakeSecurityOnionClient.last_instance.fetch_calls == 3

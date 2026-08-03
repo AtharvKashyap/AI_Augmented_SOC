@@ -74,6 +74,12 @@ class Settings:
     securityonion_host: str
     securityonion_user: str
     securityonion_password: str
+    securityonion_client_id: str
+    securityonion_client_secret: str
+    securityonion_verify_tls: bool
+    securityonion_lookback_minutes: int
+    securityonion_alert_limit: int
+    securityonion_grid_id: str
     securityonion_alert_index: str
     securityonion_zeek_index: str
     so_min_severity: int
@@ -199,7 +205,11 @@ class Settings:
         _require_non_empty("WAZUH_MANAGER_PASSWORD", self.wazuh_manager_password)
 
     def validate_security_onion(self) -> None:
-        """Validate that required Security Onion settings are present.
+        """Validate that required Security Onion Connect API settings are present.
+
+        The Connect API authenticates with an OAuth2 client ID and secret, not
+        the console username and password. SECURITYONION_USER/PASSWORD remain in
+        settings for any future index-level access but are not used here.
 
         Inputs:
             None. Uses Security Onion fields from this settings object.
@@ -212,8 +222,8 @@ class Settings:
         """
 
         _require_non_empty("SECURITYONION_HOST", self.securityonion_host)
-        _require_non_empty("SECURITYONION_USER", self.securityonion_user)
-        _require_non_empty("SECURITYONION_PASSWORD", self.securityonion_password)
+        _require_non_empty("SECURITYONION_CLIENT_ID", self.securityonion_client_id)
+        _require_non_empty("SECURITYONION_CLIENT_SECRET", self.securityonion_client_secret)
 
     def validate_openrouter(self) -> None:
         """Validate that required OpenRouter settings are present.
@@ -390,6 +400,16 @@ def _load_settings_from_env() -> Settings:
         securityonion_host=_get_str("SECURITYONION_HOST", ""),
         securityonion_user=_get_str("SECURITYONION_USER", ""),
         securityonion_password=_get_str("SECURITYONION_PASSWORD", ""),
+        securityonion_client_id=_get_str("SECURITYONION_CLIENT_ID", ""),
+        securityonion_client_secret=_get_str("SECURITYONION_CLIENT_SECRET", ""),
+        securityonion_verify_tls=_get_bool("SECURITYONION_VERIFY_TLS", True),
+        securityonion_lookback_minutes=_get_int(
+            "SECURITYONION_LOOKBACK_MINUTES",
+            _get_int("ALERT_LOOKBACK_MINUTES", 5, minimum=1),
+            minimum=1,
+        ),
+        securityonion_alert_limit=_get_int("SECURITYONION_ALERT_LIMIT", 100, minimum=1),
+        securityonion_grid_id=_get_str("SECURITYONION_GRID_ID", ""),
         securityonion_alert_index=_get_str("SECURITYONION_ALERT_INDEX", "so-ids-*"),
         securityonion_zeek_index=_get_str("SECURITYONION_ZEEK_INDEX", "so-zeek-*"),
         so_min_severity=_get_int("SO_MIN_SEVERITY", 2, minimum=0),

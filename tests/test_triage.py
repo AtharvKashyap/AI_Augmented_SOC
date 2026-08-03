@@ -700,3 +700,94 @@ def test_triage_system_prompt_requires_citation_and_admits_insufficiency():
 
     assert "cite" in TRIAGE_SYSTEM_PROMPT.lower()
     assert "insufficient" in TRIAGE_SYSTEM_PROMPT.lower()
+
+
+@dataclass(slots=True)
+class FakeSequenceLLMClient:
+    """Fake LLM client returning a scripted sequence of responses."""
+
+    responses: list[str]
+    calls: int = 0
+
+    def complete_text(
+        self,
+        prompt: str,
+        *,
+        system_prompt: str | None = None,
+        model: str | None = None,
+        temperature: float = 0.2,
+        max_tokens: int = 800,
+    ) -> str:
+        """Return the next scripted response, repeating the last one."""
+
+        del prompt, system_prompt, model, temperature, max_tokens
+        index = min(self.calls, len(self.responses) - 1)
+        self.calls += 1
+        response = self.responses[index]
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+
+_VALID_LLM_JSON = (
+    '{"score": 8, "fp_likelihood": "low", "action": "page_now", "summary": "Confirmed compromise"}'
+)
+
+
+def test_triage_engine_retries_once_on_malformed_json():
+    """A single malformed response should be retried, not dropped to fallback.
+
+    Falling straight back to local scoring on one bad response silently wastes
+    the model's judgment, and free-tier models return unparseable text often.
+    """
+
+    llm = FakeSequenceLLMClient(responses=["not json at all", _VALID_LLM_JSON])
+
+    result = TriageEngine(llm).triage_alert(_alert())
+
+    assert llm.calls == 2
+    assert result.analysis_source == AnalysisSource.LLM
+    assert result.score == 8
+
+
+def test_triage_engine_falls_back_when_the_retry_also_fails():
+    """Two malformed responses must end in labelled local scoring."""
+
+    llm = FakeSequenceLLMClient(responses=["not json", "still not json"])
+
+    result = TriageEngine(llm).triage_alert(_alert())
+
+    assert llm.calls == 2
+    assert result.analysis_source == AnalysisSource.LOCAL
+
+
+def test_triage_engine_does_not_retry_transport_errors():
+    """The OpenRouter client already retries transport failures itself.
+
+    Retrying here as well would multiply the wait on a rate-limited free model.
+    """
+
+    llm = FakeSequenceLLMClient(responses=[OpenRouterError("rate limited")])
+
+    result = TriageEngine(llm).triage_alert(_alert())
+
+    assert llm.calls == 1
+    assert result.analysis_source == AnalysisSource.LOCAL
+
+
+def test_triage_engine_json_retries_are_configurable():
+    """Retries must be tunable, including off."""
+
+    llm = FakeSequenceLLMClient(responses=["not json", _VALID_LLM_JSON])
+
+    result = TriageEngine(llm, max_json_retries=0).triage_alert(_alert())
+
+    assert llm.calls == 1
+    assert result.analysis_source == AnalysisSource.LOCAL
+
+
+def test_triage_engine_rejects_negative_json_retries():
+    """Invalid retry configuration must fail loudly."""
+
+    with pytest.raises(TriageError, match="max_json_retries"):
+        TriageEngine(max_json_retries=-1)

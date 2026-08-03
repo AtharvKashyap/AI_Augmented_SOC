@@ -276,3 +276,88 @@ def test_invalid_wazuh_lookback_raises_config_error(tmp_path):
 
     with pytest.raises(ConfigError, match="WAZUH_ALERT_LOOKBACK_MINUTES"):
         get_settings(env_file, reload=True)
+
+def test_security_onion_connect_api_settings_are_loaded(tmp_path):
+    """Connect API credentials and query bounds must come from the environment.
+
+    Inputs:
+        tmp_path: Pytest temporary directory fixture.
+
+    Outputs:
+        None. Assertions verify the loaded Connect API settings.
+    """
+
+    env_file = _write_env_file(
+        tmp_path,
+        """
+        SECURITYONION_HOST=https://securityonion.example
+        SECURITYONION_CLIENT_ID=soc-automation
+        SECURITYONION_CLIENT_SECRET=super-secret
+        SECURITYONION_VERIFY_TLS=false
+        SECURITYONION_LOOKBACK_MINUTES=30
+        SECURITYONION_ALERT_LIMIT=250
+        SECURITYONION_GRID_ID=grid-2
+        """,
+    )
+
+    settings = get_settings(env_file, reload=True)
+
+    assert settings.securityonion_client_id == "soc-automation"
+    assert settings.securityonion_client_secret == "super-secret"
+    assert settings.securityonion_verify_tls is False
+    assert settings.securityonion_lookback_minutes == 30
+    assert settings.securityonion_alert_limit == 250
+    assert settings.securityonion_grid_id == "grid-2"
+
+
+def test_security_onion_lookback_falls_back_to_shared_alert_lookback(tmp_path):
+    """A single ALERT_LOOKBACK_MINUTES should drive both ingestion sources.
+
+    Inputs:
+        tmp_path: Pytest temporary directory fixture.
+
+    Outputs:
+        None. Assertion verifies the fallback.
+    """
+
+    env_file = _write_env_file(tmp_path, "ALERT_LOOKBACK_MINUTES=45")
+
+    assert get_settings(env_file, reload=True).securityonion_lookback_minutes == 45
+
+
+def test_validate_security_onion_requires_connect_api_credentials(tmp_path):
+    """The Connect API authenticates with a client ID and secret, not a password.
+
+    Inputs:
+        tmp_path: Pytest temporary directory fixture.
+
+    Outputs:
+        None. Assertions verify each missing credential is reported by name.
+    """
+
+    settings = get_settings(_write_env_file(tmp_path, "OUTPUT_DIR=output"), reload=True)
+
+    with pytest.raises(ConfigError, match="SECURITYONION_HOST"):
+        settings.validate_security_onion()
+
+    settings = get_settings(
+        _write_env_file(tmp_path, "SECURITYONION_HOST=https://securityonion.example"),
+        reload=True,
+    )
+
+    with pytest.raises(ConfigError, match="SECURITYONION_CLIENT_ID"):
+        settings.validate_security_onion()
+
+    settings = get_settings(
+        _write_env_file(
+            tmp_path,
+            """
+            SECURITYONION_HOST=https://securityonion.example
+            SECURITYONION_CLIENT_ID=soc-automation
+            """,
+        ),
+        reload=True,
+    )
+
+    with pytest.raises(ConfigError, match="SECURITYONION_CLIENT_SECRET"):
+        settings.validate_security_onion()

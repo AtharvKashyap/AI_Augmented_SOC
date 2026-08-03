@@ -47,8 +47,9 @@ The phases below are all still in scope.
 **Next, and the one that changes what this project is:**
 
 1. **Build the evaluation harness and labeled set** (Milestone 2.5). There is still no way to tell whether a triage score is any good, and therefore no way to tell whether a prompt or model change helped or hurt. Until this exists, every quality claim in this document is unfalsifiable.
-2. **Get one real LLM run against real alerts.** `OPENROUTER_API_KEY` in `.env` is still the `replace-me` placeholder, so runs currently attempt an LLM call, fail auth, and fall back to local — visible as `triage_mode: llm` with `local_fallbacks > 0` in the summary. A real key plus a decision on model choice is the remaining blocker.
-3. **Run the daemon for 24h against a real Wazuh Manager.** The loop, cursor, rotation handling, and failure resilience are built and tested; only the long unattended run against real infrastructure is outstanding.
+2. **Confirm Security Onion Pro licensing.** The Connect API client is built and tested against a faked transport, but the API is a Pro-tier feature. If the deployment is not Pro, this path cannot authenticate and an index-level read path becomes a new milestone.
+3. **Get one real LLM run against real alerts.** `OPENROUTER_API_KEY` in `.env` is still the `replace-me` placeholder, so runs currently attempt an LLM call, fail auth, and fall back to local — visible as `triage_mode: llm` with `local_fallbacks > 0` in the summary. A real key plus a decision on model choice is the remaining blocker.
+4. **Run the daemon for 24h against a real Wazuh Manager.** The loop, cursor, rotation handling, and failure resilience are built and tested; only the long unattended run against real infrastructure is outstanding.
 
 ---
 
@@ -78,13 +79,21 @@ Prerequisite for the daemon (1.6), now met. A cursor store is used only in daemo
 - [ ] Decide and document a real transport: run on the Manager host, scheduled SFTP pull, or socket/Filebeat forwarding. "Copy the file manually" is not a deployment story.
 
 #### Milestone 1.2 — Security Onion client
-No Security Onion client module exists — the empty placeholder was deleted. Security Onion *normalization* is implemented and tested (1.3); only live retrieval is missing.
-- [ ] Authenticate to the Security Onion search/API endpoint available in the deployment
-- [ ] Query Security Onion alert data for Suricata IDS alerts by severity and time window
-- [ ] Query Zeek connection, DNS, and HTTP logs by source IP or destination IP when available
-- [ ] Optionally query any Wazuh data mirrored into Security Onion as a secondary source
-- [ ] Parse alert fields when present: `@timestamp`, `rule.name`, `source.ip`, `destination.ip`, `event.severity`, `suricata.alert.signature`, `network.protocol`, `dns.query`, `url.full`
-- [ ] Keep Security Onion access restricted to the management/SOC network
+Implemented in `soc/security_onion_client.py` against the **Security Onion Connect API**, selected via `run_pipeline.py --security-onion`.
+
+> **Licensing:** the Connect API is an enterprise feature and requires a **Security Onion Pro license**. Without one these settings will not authenticate. Replay fixtures remain the fallback, and an index-level read path would be a separate milestone.
+
+- [x] Authenticate to the Security Onion search/API endpoint — OAuth2 client credentials: `POST /oauth2/token` with HTTP Basic auth and `grant_type=client_credentials`, returning a bearer token cached until shortly before `expires_in` elapses. Create the client under Administration → API Clients with the `events/read` permission.
+- [x] Query Security Onion alert data by severity and time window — `GET /connect/query/data`. Severity is compared through `severity_from_security_onion` rather than numerically, because Suricata numbers severity *downwards*: with `SO_MIN_SEVERITY=2`, severities 1 and 2 are kept and 3+ dropped. Documents with no interpretable severity are kept rather than silently dropped.
+- [~] Query Zeek connection, DNS, and HTTP logs by source or destination IP — reachable through the same endpoint by supplying a `query`, but no dedicated Zeek helper methods yet
+- [~] Optionally query Wazuh data mirrored into Security Onion — possible via the `query` parameter; not wired as a distinct source
+- [x] Parse alert fields when present — handled by the existing `normalize_security_onion_event`. A test asserts the full seam: a Connect API document becomes a `RawEvent` that normalizes to an `Alert` with the expected `src_ip`, `dst_ip`, `rule_name`, `hostname`, and severity.
+- [x] Keep Security Onion access restricted to the management/SOC network — documented in `.env.example` and Security notes; `SECURITYONION_VERIFY_TLS` defaults to true
+- [x] Tolerate undocumented response shapes — one extractor handles a top-level `events` list, a nested `data.events` list, and Elasticsearch-style `hits.hits[]._source`. An unrecognized shape returns nothing and logs a warning naming the keys actually received, so a real deployment is diagnosable from logs.
+- [x] Bounded exponential retry for connection errors, timeouts, 429 and 5xx; other 4xx not retried; a persistent 401 re-authenticates exactly once
+- [x] Re-apply severity and lookback filtering locally after the query, so a grid that ignores the inferred parameters below still returns correctly filtered results
+
+**Parameters that are inferred, not documented.** The Security Onion docs do not publish the time-range, limit, timezone, or date-format parameter names for `/connect/query/data`; sibling endpoints use `range`, `zone`, and `format`. Every inferred name and value lives **only** as a `SecurityOnionConfig` field (`range_param`, `zone_param`, `format_param`, `limit_param` defaulting to `eventLimit`, plus `zone`, `date_format`, `range_datetime_format`, `range_separator`, and the deployment-specific `query` index pattern). None is hardcoded at a call site, so a real grid is corrected in exactly one place. Confirmed and hardcoded: the token endpoint and its auth, the bearer header, `/connect/query/data`, `query`, `gridId`, and `/connect/info`.
 
 #### Milestone 1.3 — Normalizer
 - [x] Define common `Alert` schema (dataclass): `id`, `source`, `timestamp`, `severity`, `rule_name`, `rule_groups`, `src_ip`, `dst_ip`, `hostname`, `agent_id`, `agent_os`, `user`, `process_name`, `command_line`, `raw`
@@ -125,6 +134,17 @@ Verified end to end against a growing `alerts.json`: cycle 1 read 2 alerts and p
 ### Phase 2 — Clustering and OpenRouter AI triage layer
 **Goal:** Score and classify alerts or alert clusters with an OpenRouter-backed LLM. Route results by score while keeping evidence auditable, and be able to *prove* the scores are usable.
 
+**Build order for the remaining work**, chosen for dependency direction and leverage:
+
+1. ~~Retry unparseable LLM responses (2.1)~~ — **done.** Smallest change, and it reduces spurious fallbacks that would otherwise pollute every measurement taken later.
+2. **Analyst review queue (2.4a)** — next. It defines the verdict schema that the evaluation set consumes, and it closes the human-in-the-loop gap. Independent of having a real API key.
+3. **Evaluation harness (2.5)** — last, because it reads 2.4a's verdict schema and is the thing to run first once a real key exists.
+
+**Verification status: this phase is being built without verification, by decision.** Every mechanism will be implemented and unit tested, but the exit criteria below are numeric thresholds that require a real LLM run against labeled data, and `OPENROUTER_API_KEY` is still a placeholder. Until that run happens:
+
+- Phase 2 is **implementation-complete, verification-pending**. Do not read a checked box here as evidence that triage quality is acceptable.
+- Any labeled entries authored without analyst review are **synthetic**: they record what we decided the scorer *should* say. Measuring against them demonstrates self-consistency, not accuracy. They must stay clearly separated from analyst-derived labels.
+
 #### Milestone 2.0 — Alert clustering
 - [x] Implement `clustering.py` to group related alerts by host, agent, user, src IP, dst IP, and configurable time window
 - [~] Define `IncidentCandidate` dataclass with `id`, `first_seen`, `last_seen`, `primary_host`, `primary_user`, `src_ips`, `dst_ips`, `alerts`, `related_events`, `asset_context`, and `enrichment` — all present except `asset_context`, which lands with Milestone 3.1
@@ -139,7 +159,7 @@ Verified end to end against a growing `alerts.json`: cycle 1 read 2 alerts and p
 - [x] Prompt returns structured JSON: `score`, `fp_likelihood`, `classification`, `action`, `summary`, `iocs`, `reasoning`, `evidence`, `recommended_actions` — all requested and all parsed. Grouped and flat IOC shapes both accepted; malformed evidence entries are dropped rather than aborting triage.
 - [x] Require the model to cite provided evidence fields for every important claim — required in the system prompt, parsed into `EvidenceItem` objects
 - [x] Require the model to say when evidence is insufficient instead of inventing context — required in the system prompt, with an instruction to prefer `queue_review` over `page_now` when evidence is thin
-- [~] Validate JSON output; retry once on malformed response — validation exists; **there is still no retry**, malformed output goes straight to local fallback
+- [x] Validate JSON output; retry once on malformed response — `TriageEngine.max_json_retries` (default 1). Only unparseable responses are retried; transport failures are not, because `OpenRouterClient` already retries those with backoff and retrying twice would multiply the wait on a rate-limited model.
 - [x] Version the prompt and record the version on every result — `TRIAGE_PROMPT_VERSION = "triage-v1"`, recorded on every LLM result and persisted
 - [ ] Verify empirically that the model actually cites only provided fields — needs Milestone 2.5 plus a real key
 
@@ -190,6 +210,8 @@ The gap that matters most. Nothing today distinguishes good triage from bad, so 
 - [x] Add a metric for fallback rate — the run summary reports `triage_mode`, `analysis_sources`, and `local_fallbacks` (counted only in LLM mode, since a local-mode run has not fallen back from anything)
 
 **Exit criteria:** LLM triage runs from the CLI against a real OpenRouter key, and on the labeled set of Milestone 2.5: **no alert labeled malicious scores ≤3**, at least **60% of alerts labeled benign score ≤3**, and **action agreement ≥70%**. Every stored result names its analysis source and model. Fallback rate under normal operation is known and recorded. High-score results generate analyst notifications; queued results can actually be reviewed and a verdict recorded.
+
+**Status: NOT MET, and not met by building more code.** The provenance, notification, and review-queue requirements are reachable without a key. The three numeric thresholds are not: they need a real key, a real model choice, and labels that came from a human looking at real alerts. This is the honest boundary of what implementation alone can deliver.
 
 ---
 

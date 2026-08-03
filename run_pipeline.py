@@ -20,6 +20,7 @@ from soc.models import AnalysisSource
 from soc.notifier import NotificationDispatcher
 from soc.openrouter_client import OpenRouterClient, OpenRouterError
 from soc.pipeline import PipelineConfig, PipelineError, SOCPipeline
+from soc.security_onion_client import SecurityOnionClient, SecurityOnionError
 from soc.triage import TriageEngine
 from soc.wazuh_client import WazuhClient, WazuhError
 
@@ -58,7 +59,12 @@ def build_parser() -> argparse.ArgumentParser:
     source_group.add_argument(
         "--wazuh",
         action="store_true",
-        help="Fetch recent alerts from Wazuh Indexer and process them.",
+        help="Read recent alerts from the Wazuh Manager alerts.json file and process them.",
+    )
+    source_group.add_argument(
+        "--security-onion",
+        action="store_true",
+        help="Fetch recent alerts from the Security Onion Connect API and process them.",
     )
     parser.add_argument(
         "--env-file",
@@ -148,7 +154,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     try:
         summary = run_from_args(args)
-    except (CliError, ConfigError, PipelineError, WazuhError) as exc:
+    except (CliError, ConfigError, PipelineError, SecurityOnionError, WazuhError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
@@ -352,7 +358,18 @@ def _build_run_cycle(
             return pipeline.run_events(events)
 
         return _wazuh_cycle
-    raise CliError("one source is required: --replay, --replay-dir, or --wazuh")
+    if args.security_onion:
+        onion = SecurityOnionClient.from_settings(settings)
+
+        def _security_onion_cycle() -> Any:
+            """Fetch recent Security Onion alerts and process them."""
+
+            return pipeline.run_events(onion.fetch_recent_events())
+
+        return _security_onion_cycle
+    raise CliError(
+        "one source is required: --replay, --replay-dir, --wazuh, or --security-onion"
+    )
 
 
 def _build_triage_engine(settings: Any, *, use_llm: bool) -> TriageEngine:
@@ -438,7 +455,11 @@ def _source_mode(args: argparse.Namespace) -> str:
         return "replay_dir"
     if args.wazuh:
         return "wazuh"
-    raise CliError("one source is required: --replay, --replay-dir, or --wazuh")
+    if args.security_onion:
+        return "security_onion"
+    raise CliError(
+        "one source is required: --replay, --replay-dir, --wazuh, or --security-onion"
+    )
 
 
 if __name__ == "__main__":
