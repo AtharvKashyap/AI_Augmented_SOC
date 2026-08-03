@@ -18,18 +18,23 @@ Wazuh alerts.json, usually /var/ossec/logs/alerts/alerts.json:
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import logging
+import os
 import ssl
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 from soc.models import EventSource, RawEvent, utc_now
+from soc.store import IngestCursor
 
 if TYPE_CHECKING:
     from soc.config import Settings
@@ -38,6 +43,26 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 JsonDict = dict[str, Any]
+
+WAZUH_ALERT_CURSOR_SOURCE = "wazuh_alerts_json"
+"""Logical ingestion source name used for alerts.json read cursors."""
+
+FINGERPRINT_BYTES = 256
+"""Leading bytes sampled to detect a log file rewritten in place."""
+
+
+class IngestCursorStore(Protocol):
+    """Minimal persistence contract the alerts.json reader needs for cursors.
+
+    `soc.store.SQLiteStore` satisfies this protocol. Tests may substitute any
+    object with the same two methods.
+    """
+
+    def get_ingest_cursor(self, source: str, path: str) -> IngestCursor | None:
+        """Return the stored cursor for one source and path, if any."""
+
+    def upsert_ingest_cursor(self, cursor: IngestCursor) -> None:
+        """Insert or update the stored cursor for one source and path."""
 
 
 class WazuhError(RuntimeError):
@@ -54,13 +79,27 @@ class WazuhRequestError(WazuhError):
 
 @dataclass(frozen=True, slots=True)
 class WazuhManagerConfig:
-    """Configuration for the Wazuh Manager API."""
+    """Configuration for the Wazuh Manager API.
+
+    Attributes:
+        url: Wazuh Manager base URL, usually https://<manager>:55000.
+        username: API username.
+        password: API password.
+        verify_tls: Whether to verify the Manager TLS certificate.
+        timeout_seconds: HTTP timeout in seconds.
+        max_retries: Retry attempts after the first request for transient
+            failures: connection errors, timeouts, HTTP 429, and HTTP 5xx.
+        retry_backoff_seconds: Base delay for exponential backoff between
+            retries. Attempt N waits base * 2 ** N seconds.
+    """
 
     url: str
     username: str
     password: str
     verify_tls: bool = True
     timeout_seconds: int = 20
+    max_retries: int = 2
+    retry_backoff_seconds: float = 1.0
 
     def __post_init__(self) -> None:
         """Validate config."""
@@ -71,6 +110,10 @@ class WazuhManagerConfig:
             raise WazuhError("Wazuh manager username cannot be empty")
         if not self.password:
             raise WazuhError("Wazuh manager password cannot be empty")
+        if self.max_retries < 0:
+            raise WazuhError("Wazuh manager max_retries cannot be negative")
+        if self.retry_backoff_seconds < 0:
+            raise WazuhError("Wazuh manager retry_backoff_seconds cannot be negative")
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,11 +141,26 @@ class WazuhAlertJsonConfig:
 class WazuhManagerClient:
     """Client for Wazuh Manager API operations."""
 
-    def __init__(self, config: WazuhManagerConfig) -> None:
-        """Initialize manager client."""
+    def __init__(
+        self,
+        config: WazuhManagerConfig,
+        *,
+        sleep: Callable[[float], None] | None = None,
+    ) -> None:
+        """Initialize manager client.
+
+        Inputs:
+            config: Wazuh Manager connection and retry configuration.
+            sleep: Optional sleep callable used for retry backoff. Defaults to
+                time.sleep; tests inject a recorder so no real time passes.
+
+        Outputs:
+            None.
+        """
 
         self.config = config
         self._token: str | None = None
+        self._sleep = sleep
         self._ssl_context = _build_ssl_context(config.verify_tls)
 
     @property
@@ -154,7 +212,61 @@ class WazuhManagerClient:
         body: JsonDict | None = None,
         retry_auth: bool = True,
     ) -> JsonDict:
-        """Send an authenticated request to Wazuh Manager."""
+        """Send an authenticated request to Wazuh Manager, retrying transients.
+
+        Transient failures (connection errors, timeouts, HTTP 429, HTTP 5xx) are
+        retried up to config.max_retries times with exponential backoff. Other
+        failures, including every 4xx except 429, are raised immediately.
+        Authentication failures are handled by the single re-authentication path
+        in _request_once and are never retried here.
+
+        Inputs:
+            method: HTTP method.
+            path: API path beginning with a slash.
+            query: Optional query parameters.
+            body: Optional JSON request body.
+            retry_auth: Whether to re-authenticate once on 401/403.
+
+        Outputs:
+            Parsed JSON response object.
+
+        Raises:
+            WazuhAuthError: If authentication fails.
+            WazuhRequestError: If the request keeps failing.
+        """
+
+        attempts = self.config.max_retries + 1
+        last_error: WazuhError | None = None
+
+        for attempt in range(attempts):
+            try:
+                return self._request_once(method, path, query=query, body=body, retry_auth=retry_auth)
+            except WazuhError as exc:
+                last_error = exc
+                if attempt >= attempts - 1 or not _is_retryable_error(exc):
+                    raise
+                delay = self.config.retry_backoff_seconds * (2**attempt)
+                logger.warning(
+                    "Retrying Wazuh request %s %s in %.2fs after transient failure: %s",
+                    method,
+                    path,
+                    delay,
+                    exc,
+                )
+                self._sleep_for(delay)
+
+        raise WazuhRequestError(f"Wazuh request failed after {attempts} attempt(s): {last_error}")
+
+    def _request_once(
+        self,
+        method: str,
+        path: str,
+        *,
+        query: dict[str, str] | None = None,
+        body: JsonDict | None = None,
+        retry_auth: bool = True,
+    ) -> JsonDict:
+        """Send one authenticated request, re-authenticating once on 401/403."""
 
         if self._token is None:
             self.authenticate()
@@ -184,6 +296,21 @@ class WazuhManagerClient:
                 ssl_context=self._ssl_context,
             )
 
+    def _sleep_for(self, seconds: float) -> None:
+        """Sleep between retries using the injected or default sleeper.
+
+        Inputs:
+            seconds: Delay in seconds.
+
+        Outputs:
+            None.
+        """
+
+        if self._sleep is not None:
+            self._sleep(seconds)
+            return
+        time.sleep(seconds)
+
     def _request_token(self) -> str:
         """Request a raw JWT token from Wazuh Manager."""
 
@@ -206,17 +333,30 @@ class WazuhManagerClient:
 class WazuhAlertJsonReader:
     """Reader for Wazuh line-delimited alerts.json files."""
 
-    def __init__(self, config: WazuhAlertJsonConfig) -> None:
+    def __init__(
+        self,
+        config: WazuhAlertJsonConfig,
+        *,
+        cursor_store: IngestCursorStore | None = None,
+        cursor_source: str = WAZUH_ALERT_CURSOR_SOURCE,
+    ) -> None:
         """Initialize alerts.json reader.
 
         Inputs:
             config: alerts.json location and filter configuration.
+            cursor_store: Optional cursor persistence. When supplied, each read
+                resumes from the stored byte offset instead of re-reading the
+                whole file, which is what an unattended polling loop needs.
+                When omitted, every read scans the whole file.
+            cursor_source: Logical source name used to key the stored cursor.
 
         Outputs:
             None.
         """
 
         self.config = config
+        self.cursor_store = cursor_store
+        self.cursor_source = cursor_source
         self.last_malformed_line_count = 0
 
     def read_recent_alerts(self) -> list[JsonDict]:
@@ -225,6 +365,12 @@ class WazuhAlertJsonReader:
         Wazuh appends to alerts.json continuously, so a truncated or partially
         written line is expected. Malformed lines are skipped, counted in
         last_malformed_line_count, and reported once as a logged warning.
+
+        With a cursor store the read starts at the persisted byte offset and the
+        offset advances past every newline-terminated line consumed, so a
+        partially written final line is re-read on the next call. Rotation and
+        truncation reset the offset to zero, meaning the whole current file is
+        read. Without a cursor store the whole file is read every time.
 
         Inputs:
             None.
@@ -245,11 +391,20 @@ class WazuhAlertJsonReader:
             raise WazuhRequestError(f"Wazuh alert JSON path is not a file: {self.config.path}")
 
         since = utc_now() - timedelta(minutes=self.config.lookback_minutes)
+        file_stat = self.config.path.stat()
+        start_offset = self._start_offset(file_stat)
+        offset = start_offset
         alerts: list[JsonDict] = []
 
-        with self.config.path.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                stripped = line.strip()
+        with self.config.path.open("rb") as handle:
+            if start_offset:
+                handle.seek(start_offset)
+
+            for raw_line in handle:
+                if raw_line.endswith(b"\n"):
+                    offset += len(raw_line)
+
+                stripped = raw_line.decode("utf-8", errors="replace").strip()
                 if not stripped:
                     continue
 
@@ -268,6 +423,8 @@ class WazuhAlertJsonReader:
 
                 alerts.append(alert)
 
+        self._save_offset(offset, file_stat)
+
         if self.last_malformed_line_count:
             logger.warning(
                 "Skipped %d malformed JSON line(s) in Wazuh alert file %s",
@@ -277,6 +434,129 @@ class WazuhAlertJsonReader:
 
         alerts.sort(key=_alert_sort_key)
         return alerts[-self.config.limit :]
+
+    def _start_offset(self, file_stat: os.stat_result) -> int:
+        """Return the byte offset this read should start from.
+
+        A stored cursor is only trusted when it still describes the same file:
+        a changed inode or device means the path was rotated to a new file, and
+        a file smaller than the stored offset means it was truncated. Both cases
+        reset the offset to zero so no alert is silently skipped.
+
+        Inputs:
+            file_stat: Stat result for the configured alerts.json path.
+
+        Outputs:
+            Byte offset to seek to, zero when the whole file should be read.
+        """
+
+        if self.cursor_store is None:
+            return 0
+
+        cursor = self.cursor_store.get_ingest_cursor(self.cursor_source, str(self.config.path))
+        if cursor is None:
+            return 0
+
+        if cursor.inode is not None and cursor.inode != file_stat.st_ino:
+            logger.warning(
+                "Wazuh alert file %s was rotated (inode %s -> %s); reading from the start",
+                self.config.path,
+                cursor.inode,
+                file_stat.st_ino,
+            )
+            return 0
+
+        if cursor.device is not None and cursor.device != file_stat.st_dev:
+            logger.warning(
+                "Wazuh alert file %s moved to another device (%s -> %s); reading from the start",
+                self.config.path,
+                cursor.device,
+                file_stat.st_dev,
+            )
+            return 0
+
+        if file_stat.st_size < cursor.byte_offset:
+            logger.warning(
+                "Wazuh alert file %s was truncated (size %d < offset %d); reading from the start",
+                self.config.path,
+                file_stat.st_size,
+                cursor.byte_offset,
+            )
+            return 0
+
+        if cursor.content_fingerprint and not self._fingerprint_matches(cursor.content_fingerprint):
+            logger.warning(
+                "Wazuh alert file %s was rewritten in place; reading from the start",
+                self.config.path,
+            )
+            return 0
+
+        return cursor.byte_offset
+
+    def _fingerprint_matches(self, stored: str) -> bool:
+        """Return whether the file still starts with the fingerprinted bytes.
+
+        A truncate-and-refill rotation can leave both the inode and the file size
+        unchanged, so neither can detect it. Re-hashing the same leading window
+        can. The stored window length is used rather than the current one, so a
+        file that has merely grown past the window still matches.
+
+        Inputs:
+            stored: Fingerprint string of the form "<length>:<sha256 hex>".
+
+        Outputs:
+            True when the leading bytes are unchanged, False otherwise.
+        """
+
+        length_text, _, digest = stored.partition(":")
+        if not digest:
+            return True
+
+        try:
+            length = int(length_text)
+        except ValueError:
+            return True
+
+        return _fingerprint_head(self.config.path, length) == stored
+
+    @staticmethod
+    def _build_fingerprint(path: Path) -> str | None:
+        """Build a fingerprint of a file's leading bytes.
+
+        Inputs:
+            path: File to fingerprint.
+
+        Outputs:
+            Fingerprint string, or None when the file cannot be read.
+        """
+
+        return _fingerprint_head(path, FINGERPRINT_BYTES)
+
+    def _save_offset(self, offset: int, file_stat: os.stat_result) -> None:
+        """Persist the read position reached by this read.
+
+        Inputs:
+            offset: Byte offset just past the last fully consumed line.
+            file_stat: Stat result taken before the read started.
+
+        Outputs:
+            None. Nothing is persisted when no cursor store is configured.
+        """
+
+        if self.cursor_store is None:
+            return
+
+        self.cursor_store.upsert_ingest_cursor(
+            IngestCursor(
+                source=self.cursor_source,
+                path=str(self.config.path),
+                byte_offset=offset,
+                inode=file_stat.st_ino,
+                device=file_stat.st_dev,
+                content_fingerprint=self._build_fingerprint(self.config.path),
+                updated_at=utc_now(),
+            )
+        )
 
     def fetch_recent_events(
         self,
@@ -306,8 +586,26 @@ class WazuhClient:
         self.alert_reader = alert_reader
 
     @classmethod
-    def from_settings(cls, settings: "Settings") -> "WazuhClient":
-        """Build a Manager-only Wazuh client from application settings."""
+    def from_settings(
+        cls,
+        settings: "Settings",
+        *,
+        cursor_store: IngestCursorStore | None = None,
+    ) -> "WazuhClient":
+        """Build a Manager-only Wazuh client from application settings.
+
+        Inputs:
+            settings: Application settings object.
+            cursor_store: Optional ingestion cursor persistence. Supply it for
+                unattended polling so each cycle reads only new alert lines;
+                omit it for one-shot CLI runs, which read the whole file.
+
+        Outputs:
+            WazuhClient instance.
+
+        Raises:
+            WazuhError: If WAZUH_ALERT_SOURCE is not json_logs.
+        """
 
         if settings.wazuh_alert_source != "json_logs":
             raise WazuhError("Manager-only Wazuh mode requires WAZUH_ALERT_SOURCE=json_logs")
@@ -330,7 +628,8 @@ class WazuhClient:
                 lookback_minutes=settings.wazuh_alert_lookback_minutes,
                 min_level=settings.wazuh_min_level,
                 limit=settings.wazuh_alert_limit,
-            )
+            ),
+            cursor_store=cursor_store,
         )
         return cls(manager=manager, alert_reader=alert_reader)
 
@@ -579,9 +878,41 @@ def _text_request(
             raise WazuhAuthError(f"Wazuh authentication failed for {url}: {message}") from exc
         raise WazuhRequestError(f"Wazuh request failed for {url}: HTTP {exc.code}: {message}") from exc
     except urllib.error.URLError as exc:
-        raise WazuhRequestError(f"Wazuh request failed for {url}: {exc.reason}") from exc
+        raise WazuhRequestError(f"Wazuh network error for {url}: {exc.reason}") from exc
     except TimeoutError as exc:
         raise WazuhRequestError(f"Wazuh request timed out for {url}") from exc
+
+
+def _is_retryable_error(exc: WazuhError) -> bool:
+    """Return whether a Wazuh failure is transient and worth retrying.
+
+    Retryable: connection errors, timeouts, HTTP 429, and HTTP 5xx. Every other
+    4xx is a client error that a retry cannot fix, and authentication failures
+    are handled by the separate single re-authentication path.
+
+    Inputs:
+        exc: WazuhError instance.
+
+    Outputs:
+        Boolean retry flag.
+    """
+
+    if isinstance(exc, WazuhAuthError):
+        return False
+
+    message = str(exc).lower()
+    retryable_markers = (
+        "http 408",
+        "http 425",
+        "http 429",
+        "http 500",
+        "http 502",
+        "http 503",
+        "http 504",
+        "network error",
+        "timed out",
+    )
+    return any(marker in message for marker in retryable_markers)
 
 
 def _read_http_error(exc: urllib.error.HTTPError) -> str:
@@ -592,3 +923,29 @@ def _read_http_error(exc: urllib.error.HTTPError) -> str:
     except Exception:
         return str(exc)
     return body or str(exc)
+
+
+def _fingerprint_head(path: Path, length: int) -> str | None:
+    """Fingerprint the first `length` bytes of a file.
+
+    Inputs:
+        path: File to read.
+        length: Number of leading bytes to sample.
+
+    Outputs:
+        String of the form "<bytes read>:<sha256 hex>", or None on read failure.
+    """
+
+    if length <= 0:
+        return None
+
+    try:
+        with path.open("rb") as handle:
+            head = handle.read(length)
+    except OSError:
+        return None
+
+    if not head:
+        return None
+
+    return f"{len(head)}:{hashlib.sha256(head).hexdigest()}"

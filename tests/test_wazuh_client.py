@@ -14,7 +14,9 @@ import pytest
 import soc.wazuh_client as wazuh_client
 from soc.config import get_settings
 from soc.models import EventSource, utc_now
+from soc.store import SQLiteStore
 from soc.wazuh_client import (
+    WAZUH_ALERT_CURSOR_SOURCE,
     WazuhAlertJsonConfig,
     WazuhAlertJsonReader,
     WazuhAuthError,
@@ -713,3 +715,440 @@ def test_wazuh_client_from_settings_requires_json_logs_source(tmp_path, monkeypa
 
     with pytest.raises(WazuhError, match="WAZUH_ALERT_SOURCE=json_logs"):
         WazuhClient.from_settings(settings)
+
+def _cursor_store(tmp_path: Path) -> SQLiteStore:
+    """Return an initialized SQLite store for ingestion cursor tests."""
+
+    store = SQLiteStore(tmp_path / "cursor.db")
+    store.initialize()
+    return store
+
+
+def test_alert_json_reader_without_cursor_store_rereads_whole_file(tmp_path):
+    """With no cursor store the reader must keep re-reading the whole file."""
+
+    alert_path = tmp_path / "alerts.json"
+    first = _alert(alert_id="alert-001")
+    _write_alerts(alert_path, [first])
+    reader = WazuhAlertJsonReader(_alert_json_config(alert_path))
+
+    assert reader.read_recent_alerts() == [first]
+    assert reader.read_recent_alerts() == [first]
+
+    second = _alert(alert_id="alert-002")
+    _write_alerts(alert_path, [first, second])
+
+    assert reader.read_recent_alerts() == [first, second]
+
+
+def test_alert_json_reader_with_cursor_store_returns_only_new_alerts(tmp_path):
+    """A second read with a cursor store should return only appended alerts."""
+
+    alert_path = tmp_path / "alerts.json"
+    first = _alert(alert_id="alert-001")
+    _write_alerts(alert_path, [first])
+    store = _cursor_store(tmp_path)
+    reader = WazuhAlertJsonReader(_alert_json_config(alert_path), cursor_store=store)
+
+    assert reader.read_recent_alerts() == [first]
+    assert reader.read_recent_alerts() == []
+
+    second = _alert(alert_id="alert-002")
+    with alert_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(second) + "\n")
+
+    assert reader.read_recent_alerts() == [second]
+    assert reader.read_recent_alerts() == []
+
+
+def test_alert_json_reader_persists_cursor_position(tmp_path):
+    """The stored cursor should record the file end position, inode, and device."""
+
+    alert_path = tmp_path / "alerts.json"
+    _write_alerts(alert_path, [_alert(alert_id="alert-001")])
+    store = _cursor_store(tmp_path)
+    reader = WazuhAlertJsonReader(_alert_json_config(alert_path), cursor_store=store)
+
+    reader.read_recent_alerts()
+
+    stat = alert_path.stat()
+    cursor = store.get_ingest_cursor(WAZUH_ALERT_CURSOR_SOURCE, str(alert_path))
+
+    assert cursor is not None
+    assert cursor.byte_offset == stat.st_size
+    assert cursor.inode == stat.st_ino
+    assert cursor.device == stat.st_dev
+
+
+def test_alert_json_reader_rereads_whole_file_after_rotation(tmp_path):
+    """A rotated file (new inode) must be read from the beginning."""
+
+    alert_path = tmp_path / "alerts.json"
+    first = _alert(alert_id="alert-001")
+    _write_alerts(alert_path, [first])
+    store = _cursor_store(tmp_path)
+    reader = WazuhAlertJsonReader(_alert_json_config(alert_path), cursor_store=store)
+
+    original_inode = alert_path.stat().st_ino
+    assert reader.read_recent_alerts() == [first]
+
+    rotated = _alert(alert_id="alert-rotated")
+    alert_path.rename(tmp_path / "alerts.json.1")
+    _write_alerts(alert_path, [rotated])
+    assert alert_path.stat().st_ino != original_inode
+
+    assert reader.read_recent_alerts() == [rotated]
+
+
+def test_alert_json_reader_rereads_whole_file_after_truncation(tmp_path):
+    """A truncated file smaller than the stored offset must be re-read fully."""
+
+    alert_path = tmp_path / "alerts.json"
+    _write_alerts(
+        alert_path,
+        [_alert(alert_id="alert-001"), _alert(alert_id="alert-002")],
+    )
+    store = _cursor_store(tmp_path)
+    reader = WazuhAlertJsonReader(_alert_json_config(alert_path), cursor_store=store)
+
+    assert [alert["id"] for alert in reader.read_recent_alerts()] == ["alert-001", "alert-002"]
+
+    replacement = _alert(alert_id="alert-003")
+    _write_alerts(alert_path, [replacement])
+    assert alert_path.stat().st_ino == store.get_ingest_cursor(
+        WAZUH_ALERT_CURSOR_SOURCE, str(alert_path)
+    ).inode
+
+    assert reader.read_recent_alerts() == [replacement]
+
+
+def test_alert_json_reader_cursor_read_still_filters_and_limits(tmp_path):
+    """Lookback, min_level, and limit must apply to incrementally read alerts."""
+
+    alert_path = tmp_path / "alerts.json"
+    _write_alerts(alert_path, [_alert(alert_id="seed")])
+    store = _cursor_store(tmp_path)
+    config = WazuhAlertJsonConfig(
+        path=alert_path,
+        lookback_minutes=60,
+        min_level=7,
+        limit=2,
+    )
+    reader = WazuhAlertJsonReader(config, cursor_store=store)
+
+    assert [alert["id"] for alert in reader.read_recent_alerts()] == ["seed"]
+
+    appended = [
+        _alert(alert_id="too-old", timestamp=utc_now() - timedelta(days=2)),
+        _alert(alert_id="too-quiet", level=3),
+        _alert(alert_id="old-enough", timestamp=utc_now() - timedelta(minutes=30)),
+        _alert(alert_id="newer", timestamp=utc_now() - timedelta(minutes=20)),
+        _alert(alert_id="newest", timestamp=utc_now() - timedelta(minutes=10)),
+    ]
+    with alert_path.open("a", encoding="utf-8") as handle:
+        for alert in appended:
+            handle.write(json.dumps(alert) + "\n")
+
+    assert [alert["id"] for alert in reader.read_recent_alerts()] == ["newer", "newest"]
+
+
+def test_alert_json_reader_cursor_does_not_consume_partial_final_line(tmp_path):
+    """A partially written final line must be re-read once it is complete."""
+
+    alert_path = tmp_path / "alerts.json"
+    complete = _alert(alert_id="alert-001")
+    pending = _alert(alert_id="alert-002")
+    partial = json.dumps(pending)[:40]
+    alert_path.write_text(f"{json.dumps(complete)}\n{partial}", encoding="utf-8")
+    store = _cursor_store(tmp_path)
+    reader = WazuhAlertJsonReader(_alert_json_config(alert_path), cursor_store=store)
+
+    assert reader.read_recent_alerts() == [complete]
+    assert reader.last_malformed_line_count == 1
+
+    alert_path.write_text(
+        f"{json.dumps(complete)}\n{json.dumps(pending)}\n",
+        encoding="utf-8",
+    )
+
+    assert reader.read_recent_alerts() == [pending]
+    assert reader.last_malformed_line_count == 0
+
+
+@pytest.fixture(autouse=True)
+def sleep_calls(monkeypatch):
+    """Replace the Wazuh client retry sleep so tests never wait for real time.
+
+    Inputs:
+        monkeypatch: Pytest monkeypatch fixture.
+
+    Outputs:
+        List that records every requested sleep duration in order.
+    """
+
+    recorded: list[float] = []
+    monkeypatch.setattr(wazuh_client.time, "sleep", recorded.append)
+    return recorded
+
+
+def test_manager_config_rejects_invalid_retry_values():
+    """Manager config should reject negative retry settings."""
+
+    with pytest.raises(WazuhError, match="max_retries"):
+        WazuhManagerConfig(
+            url="https://manager:55000",
+            username="user",
+            password="pass",
+            max_retries=-1,
+        )
+
+    with pytest.raises(WazuhError, match="retry_backoff_seconds"):
+        WazuhManagerConfig(
+            url="https://manager:55000",
+            username="user",
+            password="pass",
+            retry_backoff_seconds=-0.5,
+        )
+
+
+def test_manager_request_retries_after_rate_limit(monkeypatch, sleep_calls):
+    """An HTTP 429 should be retried and then succeed."""
+
+    calls: list[str] = []
+
+    def fake_urlopen(request, *, timeout, context):
+        calls.append(request.full_url)
+        if len(calls) == 1:
+            raise urllib.error.HTTPError(
+                request.full_url,
+                429,
+                "Too Many Requests",
+                hdrs=None,
+                fp=None,
+            )
+        return FakeHTTPResponse(json.dumps({"data": {"affected_items": [{"id": "001"}]}}))
+
+    monkeypatch.setattr(wazuh_client.urllib.request, "urlopen", fake_urlopen)
+    client = WazuhManagerClient(_manager_config())
+    client._token = "jwt-token-123"
+
+    assert client.list_agents() == [{"id": "001"}]
+    assert len(calls) == 2
+    assert sleep_calls == [1.0]
+
+
+def test_manager_request_retries_network_errors(monkeypatch, sleep_calls):
+    """A transient connection failure should be retried and then succeed."""
+
+    calls: list[str] = []
+
+    def fake_urlopen(request, *, timeout, context):
+        calls.append(request.full_url)
+        if len(calls) == 1:
+            raise urllib.error.URLError("connection refused")
+        return FakeHTTPResponse(json.dumps({"data": {"affected_items": []}}))
+
+    monkeypatch.setattr(wazuh_client.urllib.request, "urlopen", fake_urlopen)
+    client = WazuhManagerClient(_manager_config())
+    client._token = "jwt-token-123"
+
+    assert client.list_agents() == []
+    assert len(calls) == 2
+    assert sleep_calls == [1.0]
+
+
+def test_manager_request_gives_up_after_configured_attempts(monkeypatch, sleep_calls):
+    """A persistent HTTP 500 should stop after max_retries with exponential delays."""
+
+    calls: list[str] = []
+
+    def fake_urlopen(request, *, timeout, context):
+        calls.append(request.full_url)
+        raise urllib.error.HTTPError(
+            request.full_url,
+            500,
+            "Server Error",
+            hdrs=None,
+            fp=None,
+        )
+
+    monkeypatch.setattr(wazuh_client.urllib.request, "urlopen", fake_urlopen)
+    config = WazuhManagerConfig(
+        url="https://wazuh-manager.example:55000/",
+        username="api-user",
+        password="api-pass",
+        verify_tls=False,
+        timeout_seconds=5,
+        max_retries=2,
+        retry_backoff_seconds=0.5,
+    )
+    client = WazuhManagerClient(config)
+    client._token = "jwt-token-123"
+
+    with pytest.raises(WazuhRequestError, match="HTTP 500"):
+        client.request("GET", "/agents", retry_auth=False)
+
+    assert len(calls) == 3
+    assert sleep_calls == [0.5, 1.0]
+
+
+def test_manager_request_does_not_retry_not_found(monkeypatch, sleep_calls):
+    """An HTTP 404 is not transient and must not be retried."""
+
+    calls: list[str] = []
+
+    def fake_urlopen(request, *, timeout, context):
+        calls.append(request.full_url)
+        raise urllib.error.HTTPError(
+            request.full_url,
+            404,
+            "Not Found",
+            hdrs=None,
+            fp=None,
+        )
+
+    monkeypatch.setattr(wazuh_client.urllib.request, "urlopen", fake_urlopen)
+    client = WazuhManagerClient(_manager_config())
+    client._token = "jwt-token-123"
+
+    with pytest.raises(WazuhRequestError, match="HTTP 404"):
+        client.request("GET", "/agents", retry_auth=False)
+
+    assert len(calls) == 1
+    assert sleep_calls == []
+
+
+def test_manager_request_does_not_retry_auth_failures(monkeypatch, sleep_calls):
+    """A persistent 401 must re-authenticate exactly once and not back off."""
+
+    calls: list[str] = []
+
+    def fake_urlopen(request, *, timeout, context):
+        calls.append(request.full_url)
+        if request.full_url.endswith("/security/user/authenticate?raw=true"):
+            return FakeHTTPResponse("jwt-token-123")
+        raise urllib.error.HTTPError(
+            request.full_url,
+            401,
+            "Unauthorized",
+            hdrs=None,
+            fp=None,
+        )
+
+    monkeypatch.setattr(wazuh_client.urllib.request, "urlopen", fake_urlopen)
+    client = WazuhManagerClient(_manager_config())
+    client._token = "jwt-token-123"
+
+    with pytest.raises(WazuhAuthError, match="authentication failed"):
+        client.request("GET", "/agents")
+
+    assert calls.count("https://wazuh-manager.example:55000/agents") == 2
+    assert sleep_calls == []
+
+
+def test_manager_request_uses_injected_sleep(monkeypatch):
+    """A caller-supplied sleep callable should be used for backoff."""
+
+    injected: list[float] = []
+    calls: list[str] = []
+
+    def fake_urlopen(request, *, timeout, context):
+        calls.append(request.full_url)
+        if len(calls) == 1:
+            raise urllib.error.HTTPError(
+                request.full_url,
+                503,
+                "Service Unavailable",
+                hdrs=None,
+                fp=None,
+            )
+        return FakeHTTPResponse(json.dumps({"data": {"affected_items": []}}))
+
+    monkeypatch.setattr(wazuh_client.urllib.request, "urlopen", fake_urlopen)
+    client = WazuhManagerClient(_manager_config(), sleep=injected.append)
+    client._token = "jwt-token-123"
+
+    assert client.list_agents() == []
+    assert injected == [1.0]
+
+
+def test_wazuh_client_from_settings_accepts_cursor_store(tmp_path, monkeypatch):
+    """from_settings should pass an optional cursor store to the alert reader."""
+
+    alert_path = tmp_path / "alerts.json"
+    _write_alerts(alert_path, [_alert()])
+    monkeypatch.delenv("WAZUH_MANAGER_URL", raising=False)
+    monkeypatch.delenv("WAZUH_HOST", raising=False)
+    monkeypatch.delenv("WAZUH_MANAGER_USER", raising=False)
+    monkeypatch.delenv("WAZUH_MANAGER_PASSWORD", raising=False)
+    env_file = tmp_path / ".env.test"
+    env_file.write_text(
+        "\n".join(
+            [
+                "WAZUH_ALERT_SOURCE=json_logs",
+                f"WAZUH_ALERT_JSON_PATH={alert_path}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    settings = get_settings(env_file=env_file, reload=True)
+    store = _cursor_store(tmp_path)
+
+    client = WazuhClient.from_settings(settings, cursor_store=store)
+
+    assert client.alert_reader.cursor_store is store
+
+
+def test_alert_json_reader_detects_same_size_rewrite(tmp_path):
+    """A copytruncate rotation that lands on a similar size must not skip alerts.
+
+    Inode and size are both unchanged when a log is truncated in place and
+    immediately refilled with a comparable amount of data. Size shrinkage alone
+    cannot detect that, so the reader must fingerprint the file's leading bytes.
+
+    Inputs:
+        tmp_path: Pytest temporary directory fixture.
+
+    Outputs:
+        None. Assertion verifies the replacement alert is returned.
+    """
+
+    alert_path = tmp_path / "alerts.json"
+    store = _cursor_store(tmp_path)
+    reader = WazuhAlertJsonReader(_alert_json_config(alert_path), cursor_store=store)
+
+    first = _alert(alert_id="alert-001")
+    _write_alerts(alert_path, [first])
+    assert reader.read_recent_alerts() == [first]
+
+    # Truncate in place and refill: same inode, byte-identical length.
+    replacement = _alert(alert_id="alert-002")
+    _write_alerts(alert_path, [replacement])
+    assert alert_path.stat().st_size == len(json.dumps(first)) + 1
+
+    assert reader.read_recent_alerts() == [replacement]
+
+
+def test_alert_json_reader_keeps_cursor_when_file_only_grows(tmp_path):
+    """Fingerprinting must not cause a spurious re-read of an appended file.
+
+    Inputs:
+        tmp_path: Pytest temporary directory fixture.
+
+    Outputs:
+        None. Assertion verifies only the appended alert is returned.
+    """
+
+    alert_path = tmp_path / "alerts.json"
+    store = _cursor_store(tmp_path)
+    reader = WazuhAlertJsonReader(_alert_json_config(alert_path), cursor_store=store)
+
+    first = _alert(alert_id="alert-001")
+    _write_alerts(alert_path, [first])
+    assert reader.read_recent_alerts() == [first]
+
+    second = _alert(alert_id="alert-002")
+    with alert_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(second) + "\n")
+
+    assert reader.read_recent_alerts() == [second]

@@ -289,9 +289,14 @@ def _extract_event_dicts(payload: Any, path: Path) -> list[JsonDict]:
         event_dicts = payload
     elif isinstance(payload, dict) and isinstance(payload.get("events"), list):
         event_dicts = payload["events"]
+    elif isinstance(payload, dict):
+        # A bare object is one event. Manual test events are written by hand and
+        # should not need a one-element list wrapper.
+        event_dicts = [payload]
     else:
         raise ReplayError(
-            f"Replay file {path} must be a list of events or an object with an 'events' list"
+            f"Replay file {path} must be an event object, a list of events, "
+            "or an object with an 'events' list"
         )
 
     for event_dict in event_dicts:

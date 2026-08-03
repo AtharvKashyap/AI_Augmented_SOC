@@ -31,7 +31,7 @@ from soc.models import (
     TriageResult,
     WazuhAgent,
 )
-from soc.store import SQLiteStore, StoreStats
+from soc.store import IngestCursor, SQLiteStore, StoreError, StoreStats
 
 
 @pytest.fixture
@@ -394,3 +394,115 @@ def test_initialize_adds_provenance_columns_to_existing_database(tmp_path):
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(triage_results)")}
 
     assert {"analysis_source", "prompt_version", "latency_ms"} <= columns
+
+
+def test_get_ingest_cursor_returns_none_when_absent(store):
+    """An unknown source/path pair should have no stored ingestion cursor.
+
+    Inputs:
+        store: Initialized SQLiteStore fixture.
+
+    Outputs:
+        None. Assertions verify the missing-cursor contract.
+    """
+
+    assert store.get_ingest_cursor("wazuh_alerts_json", "/var/ossec/logs/alerts/alerts.json") is None
+
+
+def test_upsert_and_get_ingest_cursor(store):
+    """An ingestion cursor should round-trip through SQLite.
+
+    Inputs:
+        store: Initialized SQLiteStore fixture.
+
+    Outputs:
+        None. Assertions verify persisted cursor fields.
+    """
+
+    cursor = IngestCursor(
+        source="wazuh_alerts_json",
+        path="/var/ossec/logs/alerts/alerts.json",
+        byte_offset=2048,
+        inode=1234567,
+        device=16777220,
+    )
+
+    store.upsert_ingest_cursor(cursor)
+    loaded = store.get_ingest_cursor("wazuh_alerts_json", "/var/ossec/logs/alerts/alerts.json")
+
+    assert loaded is not None
+    assert loaded.source == "wazuh_alerts_json"
+    assert loaded.path == "/var/ossec/logs/alerts/alerts.json"
+    assert loaded.byte_offset == 2048
+    assert loaded.inode == 1234567
+    assert loaded.device == 16777220
+    assert loaded.updated_at is not None
+
+
+def test_upsert_ingest_cursor_updates_existing_row(store):
+    """Re-upserting the same source/path pair should advance the offset in place.
+
+    Inputs:
+        store: Initialized SQLiteStore fixture.
+
+    Outputs:
+        None. Assertions verify a single updated row.
+    """
+
+    store.upsert_ingest_cursor(
+        IngestCursor(source="wazuh_alerts_json", path="/alerts.json", byte_offset=10, inode=1, device=2)
+    )
+    store.upsert_ingest_cursor(
+        IngestCursor(source="wazuh_alerts_json", path="/alerts.json", byte_offset=99, inode=3, device=4)
+    )
+
+    loaded = store.get_ingest_cursor("wazuh_alerts_json", "/alerts.json")
+
+    assert loaded is not None
+    assert loaded.byte_offset == 99
+    assert loaded.inode == 3
+    assert loaded.device == 4
+
+    with store._connect() as conn:
+        count = conn.execute("SELECT COUNT(*) AS n FROM ingest_cursors").fetchone()["n"]
+
+    assert count == 1
+
+
+def test_ingest_cursors_are_scoped_by_source_and_path(store):
+    """Cursors for different sources or paths must not collide.
+
+    Inputs:
+        store: Initialized SQLiteStore fixture.
+
+    Outputs:
+        None. Assertions verify per-key isolation.
+    """
+
+    store.upsert_ingest_cursor(IngestCursor(source="wazuh_alerts_json", path="/a.json", byte_offset=1))
+    store.upsert_ingest_cursor(IngestCursor(source="wazuh_alerts_json", path="/b.json", byte_offset=2))
+    store.upsert_ingest_cursor(IngestCursor(source="other_source", path="/a.json", byte_offset=3))
+
+    assert store.get_ingest_cursor("wazuh_alerts_json", "/a.json").byte_offset == 1
+    assert store.get_ingest_cursor("wazuh_alerts_json", "/b.json").byte_offset == 2
+    assert store.get_ingest_cursor("other_source", "/a.json").byte_offset == 3
+
+
+def test_ingest_cursor_rejects_invalid_values():
+    """IngestCursor should validate its own fields.
+
+    Inputs:
+        None.
+
+    Outputs:
+        None. Assertions verify validation errors.
+    """
+
+    with pytest.raises(StoreError, match="source"):
+        IngestCursor(source="", path="/a.json", byte_offset=0)
+
+    with pytest.raises(StoreError, match="path"):
+        IngestCursor(source="wazuh_alerts_json", path="", byte_offset=0)
+
+    with pytest.raises(StoreError, match="byte_offset"):
+        IngestCursor(source="wazuh_alerts_json", path="/a.json", byte_offset=-1)

@@ -15,6 +15,7 @@ from soc.dedup import DeduplicationError, DeduplicationService
 from soc.models import (
     Alert,
     AlertSeverity,
+    AnalysisSource,
     EnrichmentResult,
     EventSource,
     EvidenceItem,
@@ -31,7 +32,7 @@ from soc.models import (
 )
 from soc.normalizer import NormalizationError, Normalizer
 from soc.replay import ReplayError, ReplayLoadResult, load_replay_directory, load_replay_file
-from soc.store import SQLiteStore, StoreError, StoreStats
+from soc.store import IngestCursor, SQLiteStore, StoreError, StoreStats
 
 
 __version__ = "0.1.0"
@@ -39,6 +40,7 @@ __version__ = "0.1.0"
 __all__ = [
     "Alert",
     "AlertSeverity",
+    "AnalysisSource",
     "ConfigError",
     "DeduplicationError",
     "DeduplicationService",
@@ -48,6 +50,7 @@ __all__ = [
     "FalsePositiveLikelihood",
     "IncidentCandidate",
     "IncidentReport",
+    "IngestCursor",
     "NormalizationError",
     "Normalizer",
     "RawEvent",

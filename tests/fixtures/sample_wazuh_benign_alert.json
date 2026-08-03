@@ -1,0 +1,43 @@
+[
+    {
+      "id": "wazuh-ssh-success-001",
+      "source": "wazuh",
+      "timestamp": "2026-06-10T09:15:00Z",
+      "payload": {
+        "id": "wazuh-ssh-success-001",
+        "timestamp": "2026-06-10T09:15:00Z",
+        "agent": {
+          "id": "004",
+          "name": "linux-app-01",
+          "ip": "10.0.1.10",
+          "os": {
+            "name": "Ubuntu"
+          }
+        },
+        "manager": {
+          "name": "wazuh-manager-01"
+        },
+        "rule": {
+          "id": "5715",
+          "level": 3,
+          "description": "sshd: authentication success.",
+          "groups": [
+            "syslog",
+            "sshd",
+            "authentication_success"
+          ]
+        },
+        "decoder": {
+          "name": "sshd"
+        },
+        "location": "/var/log/auth.log",
+        "data": {
+          "srcip": "10.0.1.55",
+          "dstip": "10.0.1.10",
+          "srcport": "51022",
+          "dstuser": "deploy"
+        },
+        "full_log": "Jun 10 09:15:00 linux-app-01 sshd[2411]: Accepted publickey for deploy from 10.0.1.55 port 51022 ssh2: RSA SHA256:0Qk1example"
+      }
+    }
+  ]

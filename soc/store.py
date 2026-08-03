@@ -74,6 +74,59 @@ class StoreStats:
     dedup_keys: int
 
 
+@dataclass(frozen=True, slots=True)
+class IngestCursor:
+    """Persistent read position for one append-only ingestion source.
+
+    A cursor lets an unattended reader resume where the previous cycle stopped
+    instead of re-reading a whole file. The inode and device fields exist so
+    log rotation can be detected: when either changes, the file behind the path
+    is a different file and the offset is meaningless.
+
+    Attributes:
+        source: Logical source name, for example wazuh_alerts_json.
+        path: Absolute path of the file being read.
+        byte_offset: Byte position just past the last fully consumed record.
+        inode: Filesystem inode of the file when the offset was recorded.
+        device: Filesystem device ID of the file when the offset was recorded.
+        content_fingerprint: Digest of the file's leading bytes, formatted as
+            "<length>:<sha256 hex>". Inode and size cannot detect a log that was
+            truncated in place and refilled to a similar length, which is what
+            copytruncate-style rotation does; comparing the leading bytes can.
+            The length is stored with the digest so a file that later grows past
+            the sampled window is still recognized as the same file.
+        updated_at: Time the cursor was last written, set by the store on load.
+    """
+
+    source: str
+    path: str
+    byte_offset: int
+    inode: int | None = None
+    device: int | None = None
+    content_fingerprint: str | None = None
+    updated_at: datetime | None = None
+
+    def __post_init__(self) -> None:
+        """Validate cursor fields.
+
+        Inputs:
+            None.
+
+        Outputs:
+            None.
+
+        Raises:
+            StoreError: If the source, path, or byte_offset is invalid.
+        """
+
+        if self.source.strip() == "":
+            raise StoreError("IngestCursor source is required")
+        if self.path.strip() == "":
+            raise StoreError("IngestCursor path is required")
+        if self.byte_offset < 0:
+            raise StoreError("IngestCursor byte_offset cannot be negative")
+
+
 class SQLiteStore:
     """SQLite-backed persistence layer for the SOC pipeline.
 
@@ -545,6 +598,77 @@ class SQLiteStore:
             )
             return cursor.rowcount
 
+    def get_ingest_cursor(self, source: str, path: str) -> IngestCursor | None:
+        """Fetch the stored read position for one ingestion source and path.
+
+        Inputs:
+            source: Logical source name, for example wazuh_alerts_json.
+            path: Absolute path of the file being read.
+
+        Outputs:
+            IngestCursor if a cursor was stored, otherwise None.
+        """
+
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT source, path, byte_offset, inode, device,
+                       content_fingerprint, updated_at
+                FROM ingest_cursors
+                WHERE source = ? AND path = ?
+                """,
+                (source, path),
+            ).fetchone()
+
+        if row is None:
+            return None
+
+        return IngestCursor(
+            source=row["source"],
+            path=row["path"],
+            byte_offset=int(row["byte_offset"]),
+            inode=None if row["inode"] is None else int(row["inode"]),
+            device=None if row["device"] is None else int(row["device"]),
+            content_fingerprint=row["content_fingerprint"],
+            updated_at=_text_to_dt(row["updated_at"]),
+        )
+
+    def upsert_ingest_cursor(self, cursor: IngestCursor) -> None:
+        """Insert or update the read position for one ingestion source and path.
+
+        Inputs:
+            cursor: IngestCursor describing the new read position.
+
+        Outputs:
+            None. The cursor is persisted, keyed by source and path.
+        """
+
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO ingest_cursors (
+                    source, path, byte_offset, inode, device,
+                    content_fingerprint, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(source, path) DO UPDATE SET
+                    byte_offset = excluded.byte_offset,
+                    inode = excluded.inode,
+                    device = excluded.device,
+                    content_fingerprint = excluded.content_fingerprint,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    cursor.source,
+                    cursor.path,
+                    cursor.byte_offset,
+                    cursor.inode,
+                    cursor.device,
+                    cursor.content_fingerprint,
+                    _dt_to_text(cursor.updated_at or utc_now()),
+                ),
+            )
+
     def stats(self) -> StoreStats:
         """Return basic row counts for core tables.
 
@@ -597,6 +721,9 @@ class SQLiteStore:
 
 
 _ADDED_COLUMNS: dict[str, dict[str, str]] = {
+    "ingest_cursors": {
+        "content_fingerprint": "TEXT",
+    },
     "triage_results": {
         "latency_ms": "INTEGER",
         "analysis_source": "TEXT",
@@ -753,6 +880,17 @@ CREATE TABLE IF NOT EXISTS dedup_keys (
 
 CREATE INDEX IF NOT EXISTS idx_dedup_keys_expires_at
     ON dedup_keys(expires_at);
+
+CREATE TABLE IF NOT EXISTS ingest_cursors (
+    source TEXT NOT NULL,
+    path TEXT NOT NULL,
+    byte_offset INTEGER NOT NULL,
+    inode INTEGER,
+    device INTEGER,
+    content_fingerprint TEXT,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (source, path)
+);
 """
 
 
@@ -800,6 +938,28 @@ def _dt_to_text(value: datetime | None) -> str | None:
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
     return value.isoformat()
+
+
+def _text_to_dt(value: str | None) -> datetime | None:
+    """Convert ISO-8601 text from the database into a datetime.
+
+    Inputs:
+        value: ISO-8601 string or None.
+
+    Outputs:
+        Timezone-aware UTC datetime, or None when the value is missing or
+        unparseable.
+    """
+
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _count_rows(conn: sqlite3.Connection, table: str) -> int:
