@@ -30,6 +30,13 @@ python3 run_pipeline.py --wazuh --db data/wazuh_test.db --output output --pretty
 
 Add `--no-llm` to any run to force deterministic local triage regardless of `OPENROUTER_API_KEY`. Check `triage_mode` and `local_fallbacks` in the JSON summary to see which engine actually scored the run.
 
+Continuous polling (Milestone 1.6):
+
+```bash
+python3 run_pipeline.py --wazuh --daemon --poll-interval 60           # runs until SIGINT/SIGTERM
+python3 run_pipeline.py --wazuh --daemon --max-cycles 3 --no-llm      # bounded, for testing
+```
+
 CI runs ruff + pytest + the replay smoke test on Linux/macOS/Windows × Python 3.11/3.12. It never touches live Wazuh, Security Onion, OpenRouter, SMTP, or Slack.
 
 ## Architecture
@@ -57,6 +64,8 @@ Things that only become clear after reading several files:
 - **Score is the single source of truth for routing.** `soc/router.py` always derives the action from the score via `page_threshold=8` / `queue_threshold=4`. `TriageResult.action` records what the model or local scorer *suggested* but does not decide anything; when the two disagree, `RoutingDecision.message` says so.
 - **IDs are deterministic content fingerprints**, not random: `CAND-YYYYMMDD-NNN-<hash>` from clustering, similar schemes in `normalizer._build_alert_id`, `triage._build_triage_id`, `router._build_routing_decision_id`. Report filenames are `{candidate.id}.md`. Reruns of the same input therefore produce the same IDs and overwrite the same reports.
 - **Dedup is content-based and persistent.** `soc/dedup.py` builds keys (raw event, alert, source+source_id, payload fingerprint) stored with a TTL in the SQLite `dedup_keys` table. A second run over the same fixture is a no-op unless you pass `--no-dedup` or use a fresh `--db`.
+- **Daemon mode changes ingestion semantics, not the pipeline.** `soc/daemon.py` is deliberately ignorant of Wazuh and the pipeline: it takes a `run_cycle` callable, so any source can drive it and it stays trivially testable. `--daemon` passes the pipeline's store to `WazuhClient.from_settings(cursor_store=...)`, which makes the reader resume from a persisted byte offset instead of rescanning the file; a one-shot run passes `None` and keeps the old whole-file behaviour. The pipeline, Wazuh client, and cursor are built **once** and reused across cycles — rebuilding per cycle would reset the cursor. A failing cycle is logged to `logs/daemon.jsonl` and the loop continues.
+- **The CLI initializes the database before the first cycle.** The pipeline also initializes its store when it processes events, but the read cursor is consulted *before* that, so the schema must already exist. This bug passed 324 unit tests because every one of them used a fake store; only an end-to-end test with real components caught it. Prefer at least one real-component test per integration seam.
 - **`SQLiteStore.initialize()` migrates before it creates.** `CREATE TABLE IF NOT EXISTS` leaves older databases on their original schema, so `_apply_column_migrations` runs first and `ALTER TABLE`s any column listed in `_ADDED_COLUMNS` that is missing. Order matters: indexes in `_SCHEMA_SQL` may reference columns that only exist after migration. When you add a column to an existing table, add it to both places.
 
 ### Configuration
@@ -87,6 +96,8 @@ Config tests write a throwaway `.env.test` under `tmp_path` and `monkeypatch.del
 - Config-holding dataclasses are `frozen=True, slots=True` and validate in `__post_init__`.
 - `soc/__init__.py` re-exports the stable foundation objects with an explicit `__all__` — keep it in sync when adding public models or loaders.
 - One test module per `soc` module (`tests/test_<module>.py`), fixtures in `tests/fixtures/`. Live-integration tests fake the transport rather than hitting the network.
+- `tests/conftest.py` snapshots and restores `os.environ` and the settings cache around every test. This is load-bearing: `get_settings` uses `load_dotenv`, which writes into `os.environ` permanently and does **not** override variables that are already set, so without isolation one test's `.env` silently wins over a later test's and the suite becomes order-dependent.
+- Assert on score *bands*, never exact triage scores, so tuning the heuristic does not produce false failures.
 
 ## Not built yet
 

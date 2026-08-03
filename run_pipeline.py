@@ -11,9 +11,11 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Any, Sequence
+from collections.abc import Callable, Sequence
+from typing import Any
 
 from soc.config import ConfigError, get_settings
+from soc.daemon import DaemonConfig, DaemonError, PollingDaemon
 from soc.models import AnalysisSource
 from soc.notifier import NotificationDispatcher
 from soc.openrouter_client import OpenRouterClient, OpenRouterError
@@ -107,6 +109,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="Force deterministic local triage even when an OpenRouter key is configured.",
     )
     parser.add_argument(
+        "--daemon",
+        action="store_true",
+        help="Poll continuously instead of running one cycle.",
+    )
+    parser.add_argument(
+        "--poll-interval",
+        type=int,
+        default=None,
+        help="Seconds between daemon cycles. Defaults to POLL_INTERVAL_SECONDS.",
+    )
+    parser.add_argument(
+        "--max-cycles",
+        type=int,
+        default=None,
+        help="Stop the daemon after this many cycles. Defaults to running until stopped.",
+    )
+    parser.add_argument(
         "--pretty",
         action="store_true",
         help="Pretty-print JSON summary.",
@@ -175,37 +194,165 @@ def run_from_args(args: argparse.Namespace) -> JsonDict:
         triage_engine=triage_engine,
     )
 
-    source_mode = _source_mode(args)
-    if args.replay is not None:
-        result = pipeline.run_replay_file(args.replay)
-    elif args.replay_dir is not None:
-        result = pipeline.run_replay_directory(args.replay_dir)
-    elif args.wazuh:
-        wazuh = WazuhClient.from_settings(settings)
-        events = wazuh.fetch_recent_events(
-            lookback_minutes=settings.wazuh_alert_lookback_minutes,
-            min_level=settings.wazuh_min_level,
-            limit=settings.wazuh_alert_limit,
-        )
-        result = pipeline.run_events(events)
-    else:
-        raise CliError("one source is required: --replay, --replay-dir, or --wazuh")
+    # Create the schema before anything reads it. The pipeline initializes the
+    # store when it processes events, but the alerts.json read cursor is consulted
+    # before that, so the tables must already exist.
+    _initialize_store(pipeline)
 
-    summary = result.to_summary()
+    source_mode = _source_mode(args)
+    triage_mode = "llm" if triage_engine.llm_client is not None else "local"
+    # The pipeline, Wazuh client, and read cursor are built once and reused across
+    # every cycle. Rebuilding per cycle would reset the cursor and re-read the
+    # whole alert file each time.
+    run_cycle = _build_run_cycle(args, settings, pipeline, use_cursor=args.daemon)
+
+    if args.daemon:
+        summary = _run_daemon(args, settings, run_cycle)
+    else:
+        summary = _run_once(args, run_cycle)
+
     summary["source_mode"] = source_mode
     summary["db_path"] = str(db_path)
     summary["output_dir"] = str(output_dir)
-    summary["reports_written"] = [str(path) for path in result.report_paths]
     summary["notifications_enabled"] = args.notify
     summary["dry_run"] = args.dry_run
-    triage_mode = "llm" if triage_engine.llm_client is not None else "local"
     summary["triage_mode"] = triage_mode
-    summary["analysis_sources"] = _count_analysis_sources(result)
     # Only an LLM-mode run can fall back; a local-mode run scored locally by design.
-    summary["local_fallbacks"] = (
-        summary["analysis_sources"].get(AnalysisSource.LOCAL.value, 0) if triage_mode == "llm" else 0
-    )
+    if "analysis_sources" in summary:
+        summary["local_fallbacks"] = (
+            summary["analysis_sources"].get(AnalysisSource.LOCAL.value, 0) if triage_mode == "llm" else 0
+        )
     return summary
+
+
+def _initialize_store(pipeline: Any) -> None:
+    """Create the database schema up front.
+
+    Inputs:
+        pipeline: Constructed SOCPipeline, whose store may be None.
+
+    Outputs:
+        None.
+
+    Raises:
+        CliError: If the schema cannot be created.
+    """
+
+    store = getattr(pipeline, "store", None)
+    if store is None:
+        return
+    try:
+        store.initialize()
+    except Exception as exc:
+        raise CliError(f"cannot initialize database: {exc}") from exc
+
+
+def _run_once(args: argparse.Namespace, run_cycle: Callable[[], Any]) -> JsonDict:
+    """Run one pipeline cycle and summarize it.
+
+    Inputs:
+        args: Parsed argparse namespace.
+        run_cycle: Callable performing one cycle.
+
+    Outputs:
+        JSON-safe summary dictionary.
+    """
+
+    del args
+    result = run_cycle()
+    summary = result.to_summary()
+    summary["reports_written"] = [str(path) for path in result.report_paths]
+    summary["analysis_sources"] = _count_analysis_sources(result)
+    return summary
+
+
+def _run_daemon(
+    args: argparse.Namespace,
+    settings: Any,
+    run_cycle: Callable[[], Any],
+) -> JsonDict:
+    """Run cycles continuously until stopped, and summarize the loop.
+
+    Per-cycle detail goes to the structured daemon log rather than this summary,
+    which describes the run as a whole.
+
+    Inputs:
+        args: Parsed argparse namespace.
+        settings: Application settings object.
+        run_cycle: Callable performing one cycle.
+
+    Outputs:
+        JSON-safe summary dictionary.
+
+    Raises:
+        CliError: If the daemon configuration is invalid.
+    """
+
+    try:
+        config = DaemonConfig(
+            poll_interval_seconds=args.poll_interval or int(settings.poll_interval_seconds),
+            max_cycles=args.max_cycles,
+            log_dir=Path(settings.log_dir),
+        )
+    except DaemonError as exc:
+        raise CliError(f"invalid daemon configuration: {exc}") from exc
+
+    daemon = PollingDaemon(run_cycle=run_cycle, config=config)
+    daemon.install_signal_handlers()
+    summary = daemon.run().to_summary()
+    summary["poll_interval_seconds"] = config.poll_interval_seconds
+    summary["daemon_log"] = str(config.log_dir / "daemon.jsonl")
+    return summary
+
+
+def _build_run_cycle(
+    args: argparse.Namespace,
+    settings: Any,
+    pipeline: Any,
+    *,
+    use_cursor: bool,
+) -> Callable[[], Any]:
+    """Build the callable that performs one ingestion cycle.
+
+    The Wazuh client is created once so its auth token and read cursor survive
+    across cycles. A read cursor is only used in daemon mode: a one-shot run
+    should keep reading the whole alert file, as it always has.
+
+    Inputs:
+        args: Parsed argparse namespace.
+        settings: Application settings object.
+        pipeline: Constructed SOCPipeline.
+        use_cursor: Whether to persist and resume from a read cursor.
+
+    Outputs:
+        Callable returning a pipeline run result.
+
+    Raises:
+        CliError: If no event source was selected.
+    """
+
+    if args.replay is not None:
+        return lambda: pipeline.run_replay_file(args.replay)
+    if args.replay_dir is not None:
+        return lambda: pipeline.run_replay_directory(args.replay_dir)
+    if args.wazuh:
+        wazuh = WazuhClient.from_settings(
+            settings,
+            cursor_store=getattr(pipeline, "store", None) if use_cursor else None,
+        )
+
+        def _wazuh_cycle() -> Any:
+            """Fetch recent Wazuh alerts and process them."""
+
+            events = wazuh.fetch_recent_events(
+                lookback_minutes=settings.wazuh_alert_lookback_minutes,
+                min_level=settings.wazuh_min_level,
+                limit=settings.wazuh_alert_limit,
+            )
+            return pipeline.run_events(events)
+
+        return _wazuh_cycle
+    raise CliError("one source is required: --replay, --replay-dir, or --wazuh")
 
 
 def _build_triage_engine(settings: Any, *, use_llm: bool) -> TriageEngine:

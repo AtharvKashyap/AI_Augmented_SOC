@@ -6,7 +6,7 @@ This document tracks what we're building, why, and in what order. Each phase is 
 
 **Status legend:** `[x]` done and unit tested · `[~]` partially done, see note · `[ ]` not started
 
-Status reflects the code as of the `defect-fixes` branch: 277 passing tests, `ruff` clean, replay and Wazuh-`alerts.json` ingestion working end to end. Nothing marked `[x]` has yet been exercised against a live Wazuh Manager or a live LLM call — every `[x]` means "implemented and unit tested against fakes."
+Status reflects the code as of the `defect-fixes` branch: 326 passing tests, `ruff` clean, replay and Wazuh-`alerts.json` ingestion working end to end. Nothing marked `[x]` has yet been exercised against a live Wazuh Manager or a live LLM call — every `[x]` means "implemented and unit tested against fakes."
 
 ---
 
@@ -48,7 +48,7 @@ The phases below are all still in scope.
 
 1. **Build the evaluation harness and labeled set** (Milestone 2.5). There is still no way to tell whether a triage score is any good, and therefore no way to tell whether a prompt or model change helped or hurt. Until this exists, every quality claim in this document is unfalsifiable.
 2. **Get one real LLM run against real alerts.** `OPENROUTER_API_KEY` in `.env` is still the `replace-me` placeholder, so runs currently attempt an LLM call, fail auth, and fall back to local — visible as `triage_mode: llm` with `local_fallbacks > 0` in the summary. A real key plus a decision on model choice is the remaining blocker.
-3. **Make `alerts.json` ingestion unattended-safe** (Milestone 1.1a) before attempting the daemon.
+3. **Run the daemon for 24h against a real Wazuh Manager.** The loop, cursor, rotation handling, and failure resilience are built and tested; only the long unattended run against real infrastructure is outstanding.
 
 ---
 
@@ -66,14 +66,15 @@ The phases below are all still in scope.
 - [x] Support configurable minimum severity level (`WAZUH_MIN_LEVEL`)
 - [x] Parse alert fields when present: `rule.level`, `rule.description`, `rule.groups`, `agent.name`, `agent.ip`, `agent.id`, `data.*`, `full_log`
 - [x] Handle token expiry and auto-refresh — re-authenticates once on 401/403 via `request(retry_auth=True)`
-- [ ] Handle connection failures and rate limiting with exponential backoff — no backoff in the Wazuh client; `OpenRouterClient` has linear retry backoff, the Wazuh client has none
+- [x] Handle connection failures and rate limiting with exponential backoff — bounded retry for connection errors, timeouts, 429, and 5xx via `WazuhManagerConfig.max_retries` / `retry_backoff_seconds`. Other 4xx are not retried, and the single 401/403 re-auth path is unchanged. Sleep is injectable so tests never wait.
 
 #### Milestone 1.1a — Make `alerts.json` ingestion unattended-safe *(new)*
-Required before the daemon (1.6) can run against a real Manager. The current reader is correct for one-shot CLI use and unsafe for continuous use.
-- [ ] Track a byte offset per file so each cycle reads only new lines instead of re-reading the whole file
-- [ ] Track inode/device so log rotation is detected and the offset resets instead of silently skipping alerts
+Prerequisite for the daemon (1.6), now met. A cursor store is used only in daemon mode; a one-shot CLI run still reads the whole file, as it always has.
+- [x] Track a byte offset per file so each cycle reads only new lines instead of re-reading the whole file
+- [x] Track inode/device so log rotation is detected and the offset resets instead of silently skipping alerts
+- [x] Detect in-place rewrite via a content fingerprint of the file's leading bytes — inode and size are both unchanged when a log is truncated and refilled to a similar length, so size shrinkage alone silently dropped alerts
 - [x] Skip and count malformed lines rather than raising — skipped lines are counted on `last_malformed_line_count` and logged as a warning; missing-file and not-a-file still raise
-- [ ] Persist the cursor in SQLite alongside the dedup keys
+- [x] Persist the cursor in SQLite alongside the dedup keys — `ingest_cursors` table and `IngestCursor` model
 - [ ] Decide and document a real transport: run on the Manager host, scheduled SFTP pull, or socket/Filebeat forwarding. "Copy the file manually" is not a deployment story.
 
 #### Milestone 1.2 — Security Onion client
@@ -106,13 +107,18 @@ No Security Onion client module exists — the empty placeholder was deleted. Se
 - [~] Add fixtures for common scenarios: benign Wazuh alert, suspicious endpoint alert, Suricata IDS alert, suspicious DNS event, and combined endpoint + network incident — four fixtures exist (`sample_wazuh_alert`, `sample_so_alert`, `sample_incident_replay`, `manual_events/sample_manual_incident`); the benign and DNS scenarios are missing, and these five are the natural seed for the labeled set in 2.5
 
 #### Milestone 1.6 — Polling daemon
-Depends on 1.1a. Without a cursor, a polling loop re-reads the whole alert file every cycle.
-- [ ] Implement main polling loop with configurable `POLL_INTERVAL_SECONDS`
-- [ ] Wire Wazuh client + Security Onion client + normalizer + dedup into loop
-- [ ] Structured logging (JSON lines) to `logs/`
-- [ ] Graceful shutdown on SIGINT / SIGTERM
+- [x] Implement main polling loop with configurable `POLL_INTERVAL_SECONDS` — `soc/daemon.py`, driven by `run_pipeline.py --daemon`, with `--poll-interval` and `--max-cycles` overrides
+- [~] Wire Wazuh client + Security Onion client + normalizer + dedup into loop — Wazuh, normalizer, dedup, and the read cursor are wired; Security Onion waits on Milestone 1.2. Replay sources also work, mainly for testing the loop.
+- [x] Structured logging (JSON lines) to `logs/` — one `cycle_completed` or `cycle_failed` record per cycle, plus start/stop records
+- [x] Graceful shutdown on SIGINT / SIGTERM — signals set a flag and the loop exits at the next safe point, never mid-cycle; the wait between cycles is sliced so shutdown does not have to sit out a long poll interval
+- [x] Survive a failing cycle — a cycle that raises is logged and the loop continues. A daemon that dies because one poll failed stops processing alerts silently, which is worse than a noisy failure.
+- [x] Build the pipeline, Wazuh client, and cursor once and reuse across cycles, so state is not reset every poll
+
+Verified end to end against a growing `alerts.json`: cycle 1 read 2 alerts and produced 1 candidate, cycle 2 read 0 (cursor held), cycle 3 read only the newly appended alert. Zero failed cycles.
 
 **Exit criteria:** Daemon runs continuously for 24h against a real Wazuh Manager without manual intervention, processes every new alert exactly once across at least one log rotation, survives malformed lines without aborting a cycle, and writes structured logs. Measured: zero duplicate `alert.id` values in the `alerts` table, and zero gaps when the cycle count is reconciled against the raw file. No LLM calls yet.
+
+**Status:** every mechanism is built and tested, including rotation, truncation, in-place rewrite, malformed lines, and failing cycles. The 24h run against a real Manager has **not** happened — that plus Milestone 1.2 is what remains for Phase 1.
 
 ---
 
@@ -339,12 +345,15 @@ All fixed under TDD on branch `defect-fixes`; suite grew from 240 to 277 tests.
 | `prompts/*.txt` unread | Deleted; prompts live in Python so they can be versioned and unit tested |
 | Empty placeholder files | `run_report.py`, `run_triage.py`, `soc/security_onion_client.py` and its empty test deleted |
 | `pydantic` declared, unused | Removed from `requirements.txt` |
+| No read cursor; whole file re-read each run | `ingest_cursors` table plus rotation, truncation, and in-place-rewrite detection |
+| Two shipped fixtures could not be loaded by `--replay` at all | `load_replay_file` now accepts a bare event object; a parametrized test asserts every shipped fixture loads |
+| Read cursor consulted before the schema existed | The CLI initializes the store up front. Found by an end-to-end test with real components, not by any of the 324 unit tests — every one of them used a fake store. |
+| Tests leaked `os.environ` between modules via `load_dotenv` | `tests/conftest.py` snapshots and restores the environment and settings cache around every test, so the suite is order-independent |
 
 ### Open
 
 | Defect | Location | Effect |
 |---|---|---|
-| No read cursor; whole file re-read each run | `soc/wazuh_client.py` `read_recent_alerts` | Cost scales with file size; rotation unhandled. Blocks the daemon — see Milestone 1.1a |
 | No retry on malformed LLM JSON | `soc/triage.py` `_triage_payload` | One bad response falls straight through to local scoring instead of retrying once (Milestone 2.1) |
 | `REDIS_URL` / `DEDUP_STORE` still read by config | `soc/config.py` | Implies a Redis dedup option that does not exist; removing them is a config change, not cleanup |
 | No enrichment provider or timestamp on `TriageResult` | `soc/triage.py` | Milestone 3.5 audit requirement still unmet |

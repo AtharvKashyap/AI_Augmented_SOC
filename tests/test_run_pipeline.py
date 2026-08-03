@@ -47,6 +47,21 @@ class FakeSettings:
     openrouter_model: str = "vendor/model-x"
     openrouter_site_url: str = ""
     openrouter_app_name: str = "AI_Augmented_SOC"
+    poll_interval_seconds: int = 120
+    log_dir: Path = Path("logs")
+
+
+@dataclass(slots=True)
+class FakeStore:
+    """Fake store recording schema initialization."""
+
+    db_path: Path
+    initialize_calls: int = 0
+
+    def initialize(self) -> None:
+        """Record a schema initialization call."""
+
+        self.initialize_calls += 1
 
 
 @dataclass(slots=True)
@@ -116,6 +131,7 @@ class FakeSOCPipeline:
         self.config = config
         self.notifier = notifier
         self.triage_engine = triage_engine
+        self.store = FakeStore(db_path)
         self.replay_file_calls: list[Path] = []
         self.replay_directory_calls: list[Path] = []
         self.run_events_calls: list[list[Any]] = []
@@ -174,11 +190,14 @@ class FakeWazuhClient:
         self.fetch_calls: list[dict[str, int]] = []
         FakeWazuhClient.last_instance = self
 
+    cursor_stores: list[Any] = []
+
     @classmethod
-    def from_settings(cls, settings: FakeSettings) -> FakeWazuhClient:
-        """Record settings used to build Wazuh client."""
+    def from_settings(cls, settings: FakeSettings, *, cursor_store: Any = None) -> FakeWazuhClient:
+        """Record settings and cursor store used to build Wazuh client."""
 
         cls.settings_calls.append(settings)
+        cls.cursor_stores.append(cursor_store)
         return cls()
 
     def fetch_recent_events(
@@ -207,6 +226,7 @@ def _reset_fakes() -> None:
     FakeSOCPipeline.created.clear()
     FakeSOCPipeline.last_instance = None
     FakeWazuhClient.settings_calls.clear()
+    FakeWazuhClient.cursor_stores.clear()
     FakeWazuhClient.last_instance = None
     FakeWazuhClient.events_to_return = [{"id": "wazuh-event-001"}]
 
@@ -225,11 +245,14 @@ def _patch_cli_dependencies(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> 
 
     _reset_fakes()
     settings = _settings(tmp_path)
+    settings.log_dir = tmp_path / "logs"
     monkeypatch.setattr(run_pipeline, "PipelineConfig", FakePipelineConfig)
     monkeypatch.setattr(run_pipeline, "NotificationDispatcher", FakeNotifierDispatcher)
     monkeypatch.setattr(run_pipeline, "SOCPipeline", FakeSOCPipeline)
     monkeypatch.setattr(run_pipeline, "WazuhClient", FakeWazuhClient)
     monkeypatch.setattr(run_pipeline, "get_settings", lambda env_file, reload: settings)
+    # Daemon cycles must not spend real wall-clock time in CI.
+    monkeypatch.setattr("soc.daemon.time.sleep", lambda _seconds: None)
     return settings
 
 
@@ -249,6 +272,9 @@ def _args(**overrides: Any) -> argparse.Namespace:
         "no_dedup": False,
         "fail_fast": False,
         "no_llm": False,
+        "daemon": False,
+        "poll_interval": None,
+        "max_cycles": None,
         "pretty": False,
     }
     values.update(overrides)
@@ -731,3 +757,190 @@ def test_run_from_args_reports_no_fallbacks_when_llm_was_never_used(monkeypatch,
     assert summary["triage_mode"] == "local"
     assert summary["analysis_sources"] == {"local": 1}
     assert summary["local_fallbacks"] == 0
+
+
+def test_build_parser_accepts_daemon_flags(tmp_path):
+    """The CLI must expose the polling loop and a way to bound it."""
+
+    args = build_parser().parse_args(
+        ["--wazuh", "--daemon", "--poll-interval", "30", "--max-cycles", "2"]
+    )
+
+    assert args.daemon is True
+    assert args.poll_interval == 30
+    assert args.max_cycles == 2
+
+
+def test_run_from_args_daemon_mode_runs_bounded_cycles(monkeypatch, tmp_path):
+    """Daemon mode must run the pipeline once per cycle and report the loop."""
+
+    _patch_cli_dependencies(monkeypatch, tmp_path)
+    replay_file = tmp_path / "replay.json"
+    replay_file.write_text("[]", encoding="utf-8")
+
+    summary = run_from_args(
+        _args(replay=replay_file, daemon=True, poll_interval=1, max_cycles=2)
+    )
+
+    assert summary["cycles_completed"] == 2
+    assert summary["stopped_reason"] == "max_cycles_reached"
+    assert len(FakeSOCPipeline.last_instance.replay_file_calls) == 2
+    assert summary["source_mode"] == "replay"
+
+
+def test_run_from_args_daemon_mode_builds_pipeline_only_once(monkeypatch, tmp_path):
+    """Rebuilding the pipeline per cycle would discard dedup and cursor state."""
+
+    _patch_cli_dependencies(monkeypatch, tmp_path)
+    replay_file = tmp_path / "replay.json"
+    replay_file.write_text("[]", encoding="utf-8")
+
+    run_from_args(_args(replay=replay_file, daemon=True, poll_interval=1, max_cycles=3))
+
+    assert len(FakeSOCPipeline.created) == 1
+
+
+def test_run_from_args_daemon_wazuh_mode_threads_the_cursor_store(monkeypatch, tmp_path):
+    """Without a cursor store the daemon would rescan the whole alert file."""
+
+    _patch_cli_dependencies(monkeypatch, tmp_path)
+
+    run_from_args(_args(wazuh=True, daemon=True, poll_interval=1, max_cycles=2))
+
+    assert FakeWazuhClient.cursor_stores
+    assert FakeWazuhClient.cursor_stores[0] == FakeSOCPipeline.last_instance.store
+
+
+def test_run_from_args_single_run_wazuh_mode_uses_no_cursor_store(monkeypatch, tmp_path):
+    """A one-shot run must keep reading the whole file, as before."""
+
+    _patch_cli_dependencies(monkeypatch, tmp_path)
+
+    run_from_args(_args(wazuh=True))
+
+    assert FakeWazuhClient.cursor_stores == [None]
+
+
+def test_run_from_args_daemon_uses_settings_poll_interval_by_default(monkeypatch, tmp_path):
+    """The documented POLL_INTERVAL_SECONDS setting must actually be used."""
+
+    settings = _patch_cli_dependencies(monkeypatch, tmp_path)
+    settings.poll_interval_seconds = 77
+    captured: dict[str, Any] = {}
+
+    real_daemon_config = run_pipeline.DaemonConfig
+
+    def _capture(**kwargs: Any) -> Any:
+        """Record the daemon config the CLI built."""
+
+        captured.update(kwargs)
+        return real_daemon_config(**kwargs)
+
+    monkeypatch.setattr(run_pipeline, "DaemonConfig", _capture)
+    replay_file = tmp_path / "replay.json"
+    replay_file.write_text("[]", encoding="utf-8")
+
+    run_from_args(_args(replay=replay_file, daemon=True, max_cycles=1))
+
+    assert captured["poll_interval_seconds"] == 77
+
+
+def _write_env_file(tmp_path: Path, alerts_path: Path) -> Path:
+    """Write a real .env file for end-to-end CLI tests."""
+
+    env_file = tmp_path / ".env.test"
+    env_file.write_text(
+        "\n".join(
+            [
+                "WAZUH_ALERT_SOURCE=json_logs",
+                f"WAZUH_ALERT_JSON_PATH={alerts_path}",
+                "WAZUH_ALERT_LOOKBACK_MINUTES=60",
+                "WAZUH_MIN_LEVEL=0",
+                "WAZUH_ALERT_LIMIT=50",
+                f"SQLITE_DB_PATH={tmp_path / 'soc.db'}",
+                f"OUTPUT_DIR={tmp_path / 'out'}",
+                f"LOG_DIR={tmp_path / 'logs'}",
+                "POLL_INTERVAL_SECONDS=1",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return env_file
+
+
+def _write_live_alert(alerts_path: Path, alert_id: str, *, append: bool = False) -> None:
+    """Append or write one realistic Wazuh alert line."""
+
+    from datetime import datetime, timezone
+
+    record = {
+        "id": alert_id,
+        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f%z"),
+        "rule": {"level": 10, "description": "Suspicious authentication", "groups": ["sshd"]},
+        "agent": {"id": "001", "name": "endpoint-01", "ip": "10.0.1.42"},
+        "data": {"srcip": "203.0.113.10", "dstuser": "root"},
+        "full_log": "sshd: Failed password for root from 203.0.113.10",
+    }
+    mode = "a" if append else "w"
+    with alerts_path.open(mode, encoding="utf-8") as handle:
+        handle.write(json.dumps(record) + "\n")
+
+
+def test_wazuh_daemon_mode_runs_end_to_end_with_real_components(monkeypatch, tmp_path):
+    """Daemon + cursor must work against a real store, not just against fakes.
+
+    This exercises the real SQLiteStore, alerts.json reader, cursor, pipeline,
+    and report writer. A fake store cannot catch ordering bugs such as reading
+    the cursor table before the schema exists.
+
+    Inputs:
+        monkeypatch: Pytest monkeypatch fixture.
+        tmp_path: Pytest temporary directory fixture.
+
+    Outputs:
+        None. Assertions verify a clean cycle that processed the alert.
+    """
+
+    monkeypatch.setattr("soc.daemon.time.sleep", lambda _seconds: None)
+    alerts_path = tmp_path / "alerts.json"
+    _write_live_alert(alerts_path, "live-001")
+    env_file = _write_env_file(tmp_path, alerts_path)
+
+    summary = run_from_args(
+        _args(wazuh=True, daemon=True, env_file=env_file, poll_interval=1, max_cycles=1, no_llm=True)
+    )
+
+    assert summary["errors"] == []
+    assert summary["cycles_failed"] == 0
+    assert summary["events_processed"] == 1
+    assert summary["candidates_created"] == 1
+
+
+def test_wazuh_daemon_mode_processes_each_alert_exactly_once(monkeypatch, tmp_path):
+    """The read cursor must stop the daemon reprocessing the whole file.
+
+    Inputs:
+        monkeypatch: Pytest monkeypatch fixture.
+        tmp_path: Pytest temporary directory fixture.
+
+    Outputs:
+        None. Assertions verify two cycles see two distinct alerts.
+    """
+
+    monkeypatch.setattr("soc.daemon.time.sleep", lambda _seconds: None)
+    alerts_path = tmp_path / "alerts.json"
+    _write_live_alert(alerts_path, "live-001")
+    env_file = _write_env_file(tmp_path, alerts_path)
+
+    first = run_from_args(
+        _args(wazuh=True, daemon=True, env_file=env_file, poll_interval=1, max_cycles=1, no_llm=True)
+    )
+    _write_live_alert(alerts_path, "live-002", append=True)
+    second = run_from_args(
+        _args(wazuh=True, daemon=True, env_file=env_file, poll_interval=1, max_cycles=1, no_llm=True)
+    )
+
+    assert first["events_processed"] == 1
+    assert second["events_processed"] == 1
+    assert second["cycles_failed"] == 0
