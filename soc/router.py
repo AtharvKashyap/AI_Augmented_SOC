@@ -13,9 +13,11 @@ Default routing policy:
     - score 4-7: QUEUE_REVIEW
     - score 1-3: MARK_LIKELY_BENIGN
 
-If the TriageResult already contains a specific action, the router respects it
-by default. This lets the LLM recommend an action while still allowing the app
-to apply deterministic validation and destination mapping.
+The triage score is the single source of truth for routing. TriageResult.action
+still records what the model or local scorer suggested, but the router always
+derives the applied action from the score via the configured thresholds. When
+the suggestion disagrees with the score-derived action, the disagreement is
+recorded in RoutingDecision.message so it stays visible for later evaluation.
 """
 
 from __future__ import annotations
@@ -40,8 +42,6 @@ class RoutingConfig:
         page_destination: Destination name for immediate analyst paging.
         queue_destination: Destination name for analyst review queue.
         benign_destination: Destination name for likely-benign records.
-        respect_triage_action: If True, use TriageResult.action directly. If
-            False, derive action only from score thresholds.
     """
 
     page_threshold: int = 8
@@ -49,7 +49,6 @@ class RoutingConfig:
     page_destination: str = "page_now"
     queue_destination: str = "analyst_queue"
     benign_destination: str = "likely_benign"
-    respect_triage_action: bool = True
 
     def __post_init__(self) -> None:
         """Validate routing thresholds and destinations.
@@ -129,17 +128,21 @@ class TriageRouter:
         return [self.route(result) for result in results]
 
     def _select_action(self, result: TriageResult) -> TriageAction:
-        """Select the routing action for a triage result.
+        """Derive the routing action from the triage score.
+
+        The score is the single source of truth. Any action suggested on the
+        TriageResult is ignored here and reported in the routing message.
 
         Inputs:
             result: TriageResult being routed.
 
         Outputs:
-            TriageAction selected by policy.
+            TriageAction derived from the configured score thresholds.
+
+        Raises:
+            RoutingError: If the score or configured thresholds are invalid.
         """
 
-        if self.config.respect_triage_action:
-            return result.action
         return action_from_score(
             result.score,
             page_threshold=self.config.page_threshold,
@@ -192,21 +195,24 @@ def route_triage_result(
     page_destination: str = "page_now",
     queue_destination: str = "analyst_queue",
     benign_destination: str = "likely_benign",
-    respect_triage_action: bool = True,
 ) -> RoutingDecision:
     """Convenience function for routing a single triage result.
 
+    The applied action is always derived from result.score.
+
     Inputs:
         result: TriageResult to route.
-        page_threshold: Minimum score for PAGE_NOW when deriving from score.
-        queue_threshold: Minimum score for QUEUE_REVIEW when deriving from score.
+        page_threshold: Minimum score for PAGE_NOW.
+        queue_threshold: Minimum score for QUEUE_REVIEW.
         page_destination: Destination for PAGE_NOW.
         queue_destination: Destination for QUEUE_REVIEW.
         benign_destination: Destination for MARK_LIKELY_BENIGN.
-        respect_triage_action: Whether to use result.action directly.
 
     Outputs:
         RoutingDecision object.
+
+    Raises:
+        RoutingError: If thresholds, destinations, or score are invalid.
     """
 
     config = RoutingConfig(
@@ -215,7 +221,6 @@ def route_triage_result(
         page_destination=page_destination,
         queue_destination=queue_destination,
         benign_destination=benign_destination,
-        respect_triage_action=respect_triage_action,
     )
     return TriageRouter(config).route(result)
 
@@ -279,18 +284,25 @@ def _build_routing_message(
 ) -> str:
     """Build a human-readable routing message.
 
+    If the action suggested by triage differs from the score-derived action, the
+    disagreement is noted so it is visible for later evaluation.
+
     Inputs:
         result: TriageResult being routed.
-        action: Selected routing action.
+        action: Applied routing action derived from the score.
         destination: Selected destination.
 
     Outputs:
         Routing message string.
     """
 
+    disagreement = ""
+    if result.action != action:
+        disagreement = f" (triage suggested {result.action.value}; score policy applied {action.value})"
+
     return (
         f"Routed target {result.target_id} with score {result.score}/10 "
-        f"as {action.value} to {destination}: {result.summary}"
+        f"as {action.value} to {destination}{disagreement}: {result.summary}"
     )
 
 

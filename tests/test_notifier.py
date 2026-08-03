@@ -18,6 +18,7 @@ from typing import Any
 import pytest
 
 from soc.models import (
+    AnalysisSource,
     FalsePositiveLikelihood,
     RoutingDecision,
     RoutingStatus,
@@ -555,6 +556,8 @@ def test_build_triage_notification_contains_triage_and_routing_context():
         "score": 8,
         "action": "page_now",
         "classification": "likely_true_positive_high_priority",
+        "analysis_source": "local",
+        "model": None,
     }
 
 
@@ -620,3 +623,25 @@ def test_write_notification_results_writes_json(tmp_path):
             "sent_at": BASE_TIME.isoformat(),
         }
     ]
+
+def test_triage_notification_states_analysis_source():
+    """An analyst paged on a heuristic score must be able to see that it is one."""
+
+    message = build_triage_notification(_triage())
+
+    assert "deterministic local scoring" in message.body.lower()
+    assert message.metadata["analysis_source"] == "local"
+
+
+def test_triage_notification_names_model_when_llm_scored():
+    """An LLM-scored notification must name the model in body and metadata."""
+
+    triage = _triage()
+    triage.analysis_source = AnalysisSource.LLM
+    triage.model = "vendor/model-x"
+
+    message = build_triage_notification(triage)
+
+    assert "vendor/model-x" in message.body
+    assert message.metadata["analysis_source"] == "llm"
+    assert message.metadata["model"] == "vendor/model-x"

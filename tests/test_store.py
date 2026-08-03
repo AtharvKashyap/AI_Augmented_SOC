@@ -19,6 +19,7 @@ import pytest
 from soc.models import (
     Alert,
     AlertSeverity,
+    AnalysisSource,
     EventSource,
     EvidenceItem,
     FalsePositiveLikelihood,
@@ -331,3 +332,65 @@ def test_triage_score_must_be_between_one_and_ten():
             action=TriageAction.QUEUE_REVIEW,
             summary="Invalid score test.",
         )
+
+def test_save_triage_result_persists_analysis_provenance(store):
+    """Analysis source and prompt version must be queryable, not buried in JSON."""
+
+    result = TriageResult(
+        id="triage-provenance-001",
+        target_id="CAND-20260610-001",
+        target_type="incident_candidate",
+        score=9,
+        fp_likelihood=FalsePositiveLikelihood.LOW,
+        classification="likely_true_positive",
+        action=TriageAction.PAGE_NOW,
+        summary="Model scored this as an active compromise.",
+        model="vendor/model-x",
+        latency_ms=1234,
+        analysis_source=AnalysisSource.LLM,
+        prompt_version="triage-v1",
+    )
+
+    store.save_triage_result(result)
+
+    with store._connect() as conn:
+        row = conn.execute(
+            "SELECT analysis_source, prompt_version, latency_ms FROM triage_results WHERE id = ?",
+            (result.id,),
+        ).fetchone()
+
+    assert row["analysis_source"] == "llm"
+    assert row["prompt_version"] == "triage-v1"
+    assert row["latency_ms"] == 1234
+
+
+def test_initialize_adds_provenance_columns_to_existing_database(tmp_path):
+    """An existing database created before provenance existed must be upgraded."""
+
+    db_path = tmp_path / "legacy.db"
+    legacy_store = SQLiteStore(db_path)
+    with legacy_store._connect() as conn:
+        conn.execute(
+            """
+            CREATE TABLE triage_results (
+                id TEXT PRIMARY KEY,
+                target_id TEXT NOT NULL,
+                target_type TEXT NOT NULL,
+                score INTEGER NOT NULL,
+                fp_likelihood TEXT NOT NULL,
+                classification TEXT NOT NULL,
+                action TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                model TEXT,
+                payload_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+
+    SQLiteStore(db_path).initialize()
+
+    with legacy_store._connect() as conn:
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(triage_results)")}
+
+    assert {"analysis_source", "prompt_version", "latency_ms"} <= columns

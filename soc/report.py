@@ -20,6 +20,7 @@ from typing import Any
 
 from soc.models import (
     Alert,
+    AnalysisSource,
     EnrichmentResult,
     EvidenceItem,
     IncidentCandidate,
@@ -400,9 +401,35 @@ def _triage_markdown(triage: TriageResult) -> str:
             f"- **False-positive likelihood:** `{fp_value}`",
             f"- **Classification:** `{triage.classification}`",
             f"- **Recommended action:** `{triage.action.value}`",
+            f"- **Analysis source:** {_analysis_source_description(triage)}",
             f"- **Summary:** {triage.summary}",
         ]
     )
+
+
+def _analysis_source_description(triage: TriageResult) -> str:
+    """Describe what actually produced a triage score.
+
+    A reader deciding whether to trust a score needs to know whether a model
+    produced it or whether local heuristics did, including when an LLM call
+    failed and fell back. Never let one present itself as the other.
+
+    Inputs:
+        triage: TriageResult object.
+
+    Outputs:
+        Human-readable provenance description.
+    """
+
+    if triage.analysis_source != AnalysisSource.LLM:
+        return "Deterministic local scoring (no model was consulted)"
+
+    parts = [f"LLM `{triage.model}`" if triage.model else "LLM (model not reported)"]
+    if triage.prompt_version:
+        parts.append(f"prompt `{triage.prompt_version}`")
+    if triage.latency_ms is not None:
+        parts.append(f"{triage.latency_ms} ms")
+    return ", ".join(parts)
 
 
 def _routing_markdown(routing: RoutingDecision) -> str:

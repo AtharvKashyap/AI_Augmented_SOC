@@ -110,7 +110,35 @@ class SQLiteStore:
 
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
+            self._apply_column_migrations(conn)
             conn.executescript(_SCHEMA_SQL)
+
+    def _apply_column_migrations(self, conn: sqlite3.Connection) -> None:
+        """Add columns that are missing from an already-created database.
+
+        `CREATE TABLE IF NOT EXISTS` silently leaves older databases on their
+        original schema, so columns added after a database was first created
+        must be applied explicitly. Adding a nullable column is cheap and safe
+        to run on every initialize.
+
+        This runs before the schema script so that indexes defined on newly
+        added columns can be created in the same pass. Tables that do not exist
+        yet are skipped; the schema script creates those complete.
+
+        Inputs:
+            conn: Open SQLite connection.
+
+        Outputs:
+            None. Missing columns are added in place.
+        """
+
+        for table, columns in _ADDED_COLUMNS.items():
+            existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+            if not existing:
+                continue
+            for column, column_type in columns.items():
+                if column not in existing:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")
 
     def upsert_wazuh_agent(self, agent: WazuhAgent) -> None:
         """Insert or update a Wazuh agent inventory record.
@@ -393,10 +421,11 @@ class SQLiteStore:
                 """
                 INSERT OR REPLACE INTO triage_results (
                     id, target_id, target_type, score, fp_likelihood,
-                    classification, action, summary, model, payload_json,
+                    classification, action, summary, model, latency_ms,
+                    analysis_source, prompt_version, payload_json,
                     created_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     result.id,
@@ -408,6 +437,9 @@ class SQLiteStore:
                     result.action.value,
                     result.summary,
                     result.model,
+                    result.latency_ms,
+                    result.analysis_source.value,
+                    result.prompt_version,
                     _to_json(result.to_dict()),
                     _dt_to_text(result.created_at),
                 ),
@@ -564,6 +596,15 @@ class SQLiteStore:
                 conn.close()
 
 
+_ADDED_COLUMNS: dict[str, dict[str, str]] = {
+    "triage_results": {
+        "latency_ms": "INTEGER",
+        "analysis_source": "TEXT",
+        "prompt_version": "TEXT",
+    },
+}
+
+
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS wazuh_agents (
     agent_id TEXT PRIMARY KEY,
@@ -667,9 +708,15 @@ CREATE TABLE IF NOT EXISTS triage_results (
     action TEXT NOT NULL,
     summary TEXT NOT NULL,
     model TEXT,
+    latency_ms INTEGER,
+    analysis_source TEXT,
+    prompt_version TEXT,
     payload_json TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
+
+CREATE INDEX IF NOT EXISTS idx_triage_results_analysis_source
+    ON triage_results(analysis_source);
 
 CREATE INDEX IF NOT EXISTS idx_triage_results_target
     ON triage_results(target_id, target_type);

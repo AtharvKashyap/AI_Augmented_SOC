@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import ssl
 import urllib.error
 import urllib.parse
@@ -33,6 +34,8 @@ from soc.models import EventSource, RawEvent, utc_now
 if TYPE_CHECKING:
     from soc.config import Settings
 
+
+logger = logging.getLogger(__name__)
 
 JsonDict = dict[str, Any]
 
@@ -204,12 +207,37 @@ class WazuhAlertJsonReader:
     """Reader for Wazuh line-delimited alerts.json files."""
 
     def __init__(self, config: WazuhAlertJsonConfig) -> None:
-        """Initialize alerts.json reader."""
+        """Initialize alerts.json reader.
+
+        Inputs:
+            config: alerts.json location and filter configuration.
+
+        Outputs:
+            None.
+        """
 
         self.config = config
+        self.last_malformed_line_count = 0
 
     def read_recent_alerts(self) -> list[JsonDict]:
-        """Read, parse, filter, and limit recent Wazuh alerts."""
+        """Read, parse, filter, and limit recent Wazuh alerts.
+
+        Wazuh appends to alerts.json continuously, so a truncated or partially
+        written line is expected. Malformed lines are skipped, counted in
+        last_malformed_line_count, and reported once as a logged warning.
+
+        Inputs:
+            None.
+
+        Outputs:
+            Recent alert objects sorted oldest to newest, capped at the
+            configured limit.
+
+        Raises:
+            WazuhRequestError: If the configured path is missing or not a file.
+        """
+
+        self.last_malformed_line_count = 0
 
         if not self.config.path.exists():
             raise WazuhRequestError(f"Wazuh alert JSON file does not exist: {self.config.path}")
@@ -220,17 +248,16 @@ class WazuhAlertJsonReader:
         alerts: list[JsonDict] = []
 
         with self.config.path.open("r", encoding="utf-8") as handle:
-            for line_number, line in enumerate(handle, start=1):
+            for line in handle:
                 stripped = line.strip()
                 if not stripped:
                     continue
 
                 try:
                     alert = json.loads(stripped)
-                except json.JSONDecodeError as exc:
-                    raise WazuhRequestError(
-                        f"Malformed JSON in {self.config.path} at line {line_number}: {exc}"
-                    ) from exc
+                except json.JSONDecodeError:
+                    self.last_malformed_line_count += 1
+                    continue
 
                 if not isinstance(alert, dict):
                     continue
@@ -240,6 +267,13 @@ class WazuhAlertJsonReader:
                     continue
 
                 alerts.append(alert)
+
+        if self.last_malformed_line_count:
+            logger.warning(
+                "Skipped %d malformed JSON line(s) in Wazuh alert file %s",
+                self.last_malformed_line_count,
+                self.config.path,
+            )
 
         alerts.sort(key=_alert_sort_key)
         return alerts[-self.config.limit :]

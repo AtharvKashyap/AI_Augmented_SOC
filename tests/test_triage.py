@@ -8,6 +8,7 @@ creation, and fallback behavior without making real OpenRouter calls.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -17,15 +18,22 @@ from soc.enrichment import enrich_indicator
 from soc.models import (
     Alert,
     AlertSeverity,
+    AnalysisSource,
     EnrichmentResult,
     EventSource,
     FalsePositiveLikelihood,
     IncidentCandidate,
+    RawEvent,
     TriageAction,
     TriageResult,
 )
-from soc.openrouter_client import OpenRouterError
+from soc.openrouter_client import ChatCompletionResult, OpenRouterError
 from soc.triage import (
+    MAX_CONTEXT_ALERTS,
+    MAX_CONTEXT_FIELD_CHARS,
+    TRIAGE_PROMPT_VERSION,
+    TRIAGE_SYSTEM_PROMPT,
+    TRUNCATION_MARKER,
     TriageEngine,
     TriageError,
     build_alert_triage_payload,
@@ -408,3 +416,287 @@ def test_triage_engine_rejects_invalid_config():
 
     with pytest.raises(TriageError, match="temperature"):
         TriageEngine(temperature=-1)
+
+@dataclass(slots=True)
+class FakeChatClient:
+    """Fake client exposing chat_completion so provenance metadata is available."""
+
+    response_text: str
+    model_name: str = "vendor/model-x"
+    usage: dict[str, object] = field(default_factory=lambda: {"total_tokens": 123})
+    calls: list[dict[str, object]] = field(default_factory=list)
+
+    def chat_completion(
+        self,
+        messages: list[dict[str, object]],
+        *,
+        model: str | None = None,
+        temperature: float = 0.2,
+        max_tokens: int = 800,
+    ) -> ChatCompletionResult:
+        """Record a fake chat call and return a parsed completion result."""
+
+        self.calls.append(
+            {
+                "messages": messages,
+                "model": model,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+            }
+        )
+        return ChatCompletionResult(
+            content=self.response_text,
+            model=self.model_name,
+            usage=dict(self.usage),
+            raw={},
+        )
+
+
+def test_local_triage_records_local_analysis_source():
+    """Deterministic triage must identify itself as local, not model output."""
+
+    assert local_triage_alert(_alert()).analysis_source == AnalysisSource.LOCAL
+    assert local_triage_candidate(_candidate()).analysis_source == AnalysisSource.LOCAL
+
+
+def test_llm_triage_records_llm_analysis_source_and_prompt_version():
+    """LLM-scored results must be distinguishable from local fallback results."""
+
+    llm = FakeLLMClient(
+        response_text='{"score": 7, "fp_likelihood": "medium", "action": "queue_review", "summary": "Review"}'
+    )
+
+    result = TriageEngine(llm).triage_alert(_alert())
+
+    assert result.analysis_source == AnalysisSource.LLM
+    assert result.prompt_version == TRIAGE_PROMPT_VERSION
+    assert result.latency_ms is not None
+    assert result.latency_ms >= 0
+
+
+def test_llm_fallback_records_local_analysis_source():
+    """A failed LLM call must not let the local fallback masquerade as model output."""
+
+    llm = FakeLLMClient(response_text="", raise_error=OpenRouterError("rate limited"))
+
+    result = TriageEngine(llm).triage_alert(_alert())
+
+    assert result.analysis_source == AnalysisSource.LOCAL
+    assert result.model is None
+    assert result.prompt_version is None
+
+
+def test_llm_triage_records_model_and_token_usage_from_chat_client():
+    """When the client reports model and usage, both must land on the result."""
+
+    client = FakeChatClient(
+        response_text='{"score": 9, "fp_likelihood": "low", "action": "page_now", "summary": "Active compromise"}'
+    )
+
+    result = TriageEngine(client).triage_candidate(_candidate())
+
+    assert result.analysis_source == AnalysisSource.LLM
+    assert result.model == "vendor/model-x"
+    assert result.token_usage == {"total_tokens": 123}
+    assert len(client.calls) == 1
+
+
+def _alert_with_raw(raw: dict[str, object], **overrides: object) -> Alert:
+    """Create an Alert carrying a raw source payload, for context-filter tests."""
+
+    fields: dict[str, object] = {
+        "id": "alert-raw-001",
+        "source": EventSource.WAZUH,
+        "timestamp": BASE_TIME,
+        "severity": AlertSeverity.HIGH,
+        "rule_name": "Suspicious process",
+        "hostname": "web-01",
+        "raw": raw,
+    }
+    fields.update(overrides)
+    return Alert(**fields)
+
+
+def test_alert_triage_payload_excludes_unallowlisted_raw_fields():
+    """The raw source event must not be dumped wholesale into the LLM prompt."""
+
+    alert = _alert_with_raw(
+        {
+            "full_log": "kernel: something happened",
+            "data": {"win": {"eventdata": {"targetUserName": "svc_backup"}}},
+            "predecoder": {"hostname": "internal-dc-01.corp.local"},
+        }
+    )
+
+    payload = build_alert_triage_payload(alert)
+    serialized = json.dumps(payload)
+
+    assert "svc_backup" not in serialized
+    assert "internal-dc-01.corp.local" not in serialized
+    assert "raw" not in payload["alert"]
+
+
+def test_alert_triage_payload_includes_allowlisted_raw_excerpt():
+    """Explicitly allowlisted raw fields are still useful context and are kept."""
+
+    alert = _alert_with_raw({"full_log": "sshd: Failed password for root"})
+
+    payload = build_alert_triage_payload(alert)
+
+    assert payload["alert"]["raw_excerpt"]["full_log"] == "sshd: Failed password for root"
+
+
+def test_alert_triage_payload_truncates_long_values():
+    """Long fields must be truncated so one alert cannot blow the context window."""
+
+    alert = _alert_with_raw({"full_log": "A" * 5000}, command_line="B" * 5000)
+
+    payload = build_alert_triage_payload(alert)
+
+    assert len(payload["alert"]["command_line"]) <= MAX_CONTEXT_FIELD_CHARS + len(TRUNCATION_MARKER)
+    assert payload["alert"]["command_line"].endswith(TRUNCATION_MARKER)
+    assert len(payload["alert"]["raw_excerpt"]["full_log"]) <= MAX_CONTEXT_FIELD_CHARS + len(TRUNCATION_MARKER)
+
+
+def test_candidate_triage_payload_caps_alert_count_and_reports_the_cap():
+    """A large cluster must be capped, and the caller must be told it was."""
+
+    alerts = [_alert_with_raw({}, id=f"alert-{index:03d}") for index in range(MAX_CONTEXT_ALERTS + 5)]
+    candidate = IncidentCandidate(
+        id="candidate-large",
+        first_seen=BASE_TIME,
+        last_seen=BASE_TIME,
+        alerts=alerts,
+    )
+
+    payload = build_candidate_triage_payload(candidate)
+
+    assert len(payload["candidate"]["alerts"]) == MAX_CONTEXT_ALERTS
+    assert payload["candidate"]["alert_count"] == MAX_CONTEXT_ALERTS + 5
+    assert payload["candidate"]["alerts_truncated"] is True
+
+
+def test_candidate_triage_payload_excludes_related_raw_events():
+    """Related raw events carry whole source payloads and must stay out of context."""
+
+    candidate = _candidate()
+    candidate.related_events = [
+        RawEvent(
+            id="raw-001",
+            source=EventSource.WAZUH,
+            received_at=BASE_TIME,
+            timestamp=BASE_TIME,
+            payload={"secret_token": "leak-me-please"},
+        )
+    ]
+
+    serialized = json.dumps(build_candidate_triage_payload(candidate))
+
+    assert "leak-me-please" not in serialized
+    assert "related_events" not in serialized
+
+
+def test_enrichment_payload_excludes_provider_raw_response():
+    """Third-party provider responses must not be forwarded to the LLM verbatim."""
+
+    enrichment = EnrichmentResult(
+        indicator="8.8.8.8",
+        indicator_type="ip",
+        provider="local",
+        summary="Public IP",
+        raw={"internal_note": "do-not-forward"},
+    )
+
+    serialized = json.dumps(build_alert_triage_payload(_alert(), [enrichment]))
+
+    assert "do-not-forward" not in serialized
+    assert "Public IP" in serialized
+
+
+def test_triage_result_from_llm_json_parses_iocs_and_recommended_actions():
+    """IOCs and recommended actions returned by the model must reach the result."""
+
+    payload = {
+        "score": 8,
+        "fp_likelihood": "low",
+        "action": "page_now",
+        "summary": "Credential theft attempt",
+        "iocs": {"ips": ["203.0.113.10"], "domains": ["evil.example"]},
+        "recommended_actions": ["Isolate web-01", "Reset svc_backup credentials"],
+    }
+
+    result = triage_result_from_llm_json(payload, target_id="alert-001", target_type="alert")
+
+    assert result.iocs == {"ips": ["203.0.113.10"], "domains": ["evil.example"]}
+    assert result.recommended_actions == ["Isolate web-01", "Reset svc_backup credentials"]
+
+
+def test_triage_result_from_llm_json_normalizes_flat_ioc_list():
+    """A model returning a bare IOC list must still produce usable grouped IOCs."""
+
+    payload = {
+        "score": 5,
+        "fp_likelihood": "medium",
+        "action": "queue_review",
+        "summary": "Review",
+        "iocs": ["203.0.113.10", "evil.example"],
+    }
+
+    result = triage_result_from_llm_json(payload, target_id="alert-001", target_type="alert")
+
+    assert result.iocs == {"unclassified": ["203.0.113.10", "evil.example"]}
+
+
+def test_triage_result_from_llm_json_parses_evidence_items():
+    """Cited evidence must be parsed into EvidenceItem objects for the report."""
+
+    payload = {
+        "score": 9,
+        "fp_likelihood": "low",
+        "action": "page_now",
+        "summary": "Active compromise",
+        "evidence": [
+            {"field": "command_line", "value": "powershell -enc ...", "source": "wazuh"},
+            {"field": "dst_ip", "value": "203.0.113.10"},
+        ],
+    }
+
+    result = triage_result_from_llm_json(payload, target_id="alert-001", target_type="alert")
+
+    assert [item.field for item in result.evidence] == ["command_line", "dst_ip"]
+    assert result.evidence[0].source == EventSource.WAZUH
+    assert result.evidence[1].source == EventSource.UNKNOWN
+    assert result.evidence[0].alert_id == "alert-001"
+
+
+def test_triage_result_from_llm_json_ignores_malformed_evidence_entries():
+    """Malformed evidence entries must be dropped rather than aborting triage."""
+
+    payload = {
+        "score": 4,
+        "fp_likelihood": "medium",
+        "action": "queue_review",
+        "summary": "Review",
+        "evidence": ["not-an-object", {"value": "missing field"}, {"field": "user", "value": "root"}],
+    }
+
+    result = triage_result_from_llm_json(payload, target_id="alert-001", target_type="alert")
+
+    assert [item.field for item in result.evidence] == ["user"]
+
+
+def test_triage_prompt_requests_iocs_and_evidence():
+    """The prompt must ask for the fields the report and audit trail depend on."""
+
+    prompt = build_triage_prompt(build_alert_triage_payload(_alert()))
+
+    assert "iocs" in prompt
+    assert "evidence" in prompt
+    assert "recommended_actions" in prompt
+
+
+def test_triage_system_prompt_requires_citation_and_admits_insufficiency():
+    """The model must be told to cite evidence and to admit missing evidence."""
+
+    assert "cite" in TRIAGE_SYSTEM_PROMPT.lower()
+    assert "insufficient" in TRIAGE_SYSTEM_PROMPT.lower()

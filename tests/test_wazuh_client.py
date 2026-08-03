@@ -351,15 +351,113 @@ def test_alert_json_reader_rejects_missing_file(tmp_path):
         reader.read_recent_alerts()
 
 
-def test_alert_json_reader_rejects_malformed_json(tmp_path):
-    """alerts.json reader should raise for malformed JSON lines."""
+def test_alert_json_reader_rejects_path_that_is_not_a_file(tmp_path):
+    """alerts.json reader should raise when the path is a directory."""
+
+    directory = tmp_path / "alerts_dir"
+    directory.mkdir()
+    reader = WazuhAlertJsonReader(_alert_json_config(directory))
+
+    with pytest.raises(WazuhRequestError, match="not a file"):
+        reader.read_recent_alerts()
+
+
+def test_alert_json_reader_skips_truncated_final_line(tmp_path):
+    """A truncated final line should be skipped without losing valid alerts."""
 
     alert_path = tmp_path / "alerts.json"
+    valid_alert = _alert(alert_id="alert-001")
+    truncated = json.dumps(_alert(alert_id="alert-002"))[:40]
+    alert_path.write_text(
+        f"{json.dumps(valid_alert)}\n{truncated}",
+        encoding="utf-8",
+    )
+    reader = WazuhAlertJsonReader(_alert_json_config(alert_path))
+
+    alerts = reader.read_recent_alerts()
+
+    assert alerts == [valid_alert]
+    assert reader.last_malformed_line_count == 1
+
+
+def test_alert_json_reader_skips_all_malformed_lines(tmp_path):
+    """All malformed lines should be skipped and counted."""
+
+    alert_path = tmp_path / "alerts.json"
+    valid_alert = _alert(alert_id="alert-001")
+    alert_path.write_text(
+        "\n".join(["not-json", json.dumps(valid_alert), "{broken", ""]),
+        encoding="utf-8",
+    )
+    reader = WazuhAlertJsonReader(_alert_json_config(alert_path))
+
+    assert reader.read_recent_alerts() == [valid_alert]
+    assert reader.last_malformed_line_count == 2
+
+
+def test_alert_json_reader_resets_malformed_count_each_read(tmp_path):
+    """The malformed line count should reset on every read_recent_alerts call."""
+
+    alert_path = tmp_path / "alerts.json"
+    valid_alert = _alert(alert_id="alert-001")
     alert_path.write_text("not-json\n", encoding="utf-8")
     reader = WazuhAlertJsonReader(_alert_json_config(alert_path))
 
-    with pytest.raises(WazuhRequestError, match="Malformed JSON"):
+    assert reader.read_recent_alerts() == []
+    assert reader.last_malformed_line_count == 1
+
+    _write_alerts(alert_path, [valid_alert])
+
+    assert reader.read_recent_alerts() == [valid_alert]
+    assert reader.last_malformed_line_count == 0
+
+
+def test_alert_json_reader_logs_warning_for_malformed_lines(tmp_path, caplog):
+    """Skipped malformed lines should emit a logging warning naming the file."""
+
+    alert_path = tmp_path / "alerts.json"
+    alert_path.write_text(
+        "\n".join([json.dumps(_alert(alert_id="alert-001")), "not-json"]),
+        encoding="utf-8",
+    )
+    reader = WazuhAlertJsonReader(_alert_json_config(alert_path))
+
+    with caplog.at_level("WARNING", logger="soc.wazuh_client"):
         reader.read_recent_alerts()
+
+    warnings = [record for record in caplog.records if record.levelname == "WARNING"]
+    assert len(warnings) == 1
+    assert str(alert_path) in warnings[0].getMessage()
+    assert "1" in warnings[0].getMessage()
+
+
+def test_alert_json_reader_does_not_log_when_all_lines_valid(tmp_path, caplog):
+    """No warning should be emitted when every line parses."""
+
+    alert_path = tmp_path / "alerts.json"
+    _write_alerts(alert_path, [_alert(alert_id="alert-001")])
+    reader = WazuhAlertJsonReader(_alert_json_config(alert_path))
+
+    with caplog.at_level("WARNING", logger="soc.wazuh_client"):
+        reader.read_recent_alerts()
+
+    assert reader.last_malformed_line_count == 0
+    assert [record for record in caplog.records if record.levelname == "WARNING"] == []
+
+
+def test_alert_json_reader_skips_non_dict_json_lines(tmp_path):
+    """Lines that parse but are not objects should be skipped, not counted."""
+
+    alert_path = tmp_path / "alerts.json"
+    valid_alert = _alert(alert_id="alert-001")
+    alert_path.write_text(
+        "\n".join(["[]", '"text"', json.dumps(valid_alert)]),
+        encoding="utf-8",
+    )
+    reader = WazuhAlertJsonReader(_alert_json_config(alert_path))
+
+    assert reader.read_recent_alerts() == [valid_alert]
+    assert reader.last_malformed_line_count == 0
 
 
 def test_raw_event_from_alert_json_maps_source_and_agent_context():

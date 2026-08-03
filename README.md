@@ -316,15 +316,6 @@ soc/pipeline.py           -> normalize, dedup, cluster, enrich, triage, route, r
 
 Replay mode remains useful for repeatable tests and demos. For Manager-only deployments without Indexer access, live Wazuh mode currently uses a readable or copied `alerts.json` file.
 
-### Legacy planned entry points
-
-These scripts are still useful names for later phases, but the current orchestration layer should drive them:
-
-```bash
-python3 run_triage.py --once
-python3 run_report.py --incident-id INC-20240610-001
-```
-
 Reports are written to the configured `OUTPUT_DIR` as Markdown and can be delivered by dry-run, SMTP email, or Slack-compatible webhook notifications.
 
 ---
@@ -353,8 +344,6 @@ AI_Augmented_SOC/
 ├── assets.csv                  # Asset inventory with business context
 │
 ├── run_pipeline.py             # CLI wrapper for replay and Wazuh alerts.json pipeline runs
-├── run_triage.py               # Planned live polling / one-shot triage entry point
-├── run_report.py               # Planned standalone report drafting entry point
 │
 ├── soc/                        # Core package
 │   ├── __init__.py
@@ -363,7 +352,6 @@ AI_Augmented_SOC/
 │   ├── store.py                # SQLite persistence for SOC objects and dedup keys
 │   ├── pipeline.py             # End-to-end SOC workflow orchestration
 │   ├── wazuh_client.py         # Wazuh Manager client + alerts.json reader
-│   ├── security_onion_client.py # Security Onion alert/log queries
 │   ├── openrouter_client.py    # OpenRouter chat completion wrapper
 │   ├── normalizer.py           # Merge and normalize to common alert schema
 │   ├── clustering.py           # Group related alerts into incident candidates
@@ -374,10 +362,6 @@ AI_Augmented_SOC/
 │   ├── report.py               # Markdown incident report generation
 │   ├── replay.py               # Sample/manual alert replay for testing low-alert SOCs
 │   └── notifier.py             # Dry-run, SMTP email, Slack-compatible webhook delivery
-│
-├── prompts/
-│   ├── triage_prompt.txt       # Triage system prompt (externalized)
-│   └── report_prompt.txt       # Report drafting system prompt
 │
 ├── output/                     # Generated reports
 │   └── .gitkeep
@@ -402,7 +386,6 @@ AI_Augmented_SOC/
     ├── test_notifier.py
     ├── test_pipeline.py
     ├── test_wazuh_client.py              # Wazuh Manager + alerts.json tests
-    ├── test_security_onion_client.py     # planned / next phase
     └── fixtures/
         ├── sample_wazuh_alert.json
         ├── sample_so_alert.json

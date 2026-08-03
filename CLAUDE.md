@@ -1,0 +1,97 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Commands
+
+```bash
+source venv/bin/activate                      # local venv is checked out at ./venv (gitignored)
+pip install -r requirements.txt
+
+pytest tests/ -v                              # full suite
+pytest tests/test_pipeline.py -v              # one module
+pytest tests/test_pipeline.py::test_name -v   # one test
+
+ruff check soc tests run_pipeline.py          # exactly what CI lints (no ruff config file; defaults apply)
+```
+
+Replay smoke test (this exact command is a CI step — keep it working):
+
+```bash
+python3 run_pipeline.py --replay tests/fixtures/sample_incident_replay.json \
+  --db data/soc.db --output output --no-dedup --pretty
+```
+
+Live Wazuh mode (needs a readable `alerts.json`; see "Wazuh ingestion" below):
+
+```bash
+python3 run_pipeline.py --wazuh --db data/wazuh_test.db --output output --pretty
+```
+
+Add `--no-llm` to any run to force deterministic local triage regardless of `OPENROUTER_API_KEY`. Check `triage_mode` and `local_fallbacks` in the JSON summary to see which engine actually scored the run.
+
+CI runs ruff + pytest + the replay smoke test on Linux/macOS/Windows × Python 3.11/3.12. It never touches live Wazuh, Security Onion, OpenRouter, SMTP, or Slack.
+
+## Architecture
+
+One linear pipeline, one module per stage, orchestrated by `soc/pipeline.py`:
+
+```
+RawEvent → Alert → IncidentCandidate → TriageResult → RoutingDecision → Markdown report → notification
+ replay.py  normalizer.py  clustering.py   triage.py      router.py        report.py       notifier.py
+ wazuh_client.py           (+ enrichment.py)
+```
+
+`soc/models.py` holds the data contracts for every arrow above (`RawEvent`, `Alert`, `IncidentCandidate`, `TriageResult`, `RoutingDecision`, `EnrichmentResult`, plus the `EventSource` / `AlertSeverity` / `TriageAction` / `RoutingStatus` / `AnalysisSource` enums). Stage modules must not invent their own shapes — extend `models.py` instead. Models are stdlib `@dataclass(slots=True)` — there is no pydantic or ORM anywhere in this project.
+
+Things that only become clear after reading several files:
+
+- **`SOCPipeline` is fully dependency-injected.** Every stage is a constructor kwarg with a working default (`SOCPipeline(triage_engine=..., store=..., notifier=...)`). `SOCPipeline.with_sqlite_store(db_path)` is the production wiring. Tests substitute fakes for individual stages rather than mocking internals.
+- **Errors accumulate, they don't propagate.** Each `_stage(...)` helper in `pipeline.py` catches broadly and calls `_handle_error`, which appends to a `list[str]` — unless `PipelineConfig.fail_fast` is set, in which case it raises `PipelineError`. A run "succeeding" with a populated `errors` list in the JSON summary is normal, so check `summary["errors"]`, not just the exit code.
+- **Each module also exposes module-level functions mirroring its class methods** (`soc.triage.triage_candidate`, `soc.report.build_candidate_report`, `soc.router.route_triage_result`, …). The classes carry config; the functions are the stateless entry points used heavily in tests.
+- **Every stage has a deterministic path with no network dependency.** Triage falls back to `score_*_locally` when no LLM client is injected or when LLM output fails to parse (`TriageEngine.allow_fallback`); enrichment (`LocalEnricher`) is purely local regex/IOC extraction — VirusTotal/AbuseIPDB/Shodan keys exist in `.env` but no provider is implemented; notification defaults to `DryRunNotifier`.
+- **LLM triage is opt-out, not opt-in.** `run_pipeline.py` builds `TriageEngine(OpenRouterClient.from_settings(settings))` whenever `OPENROUTER_API_KEY` is non-empty, and plain `TriageEngine()` otherwise. `--no-llm` forces local. CI has no `.env`, so CI runs stay offline and keyless.
+- **Every `TriageResult` records what produced it.** `analysis_source` is `local` or `llm`; LLM results also carry `model`, `latency_ms`, `token_usage`, and `prompt_version`. A failed LLM call falls back to local scoring *and is relabelled `local`* — a heuristic score can never present itself as model output. Reports and notifications state the source in prose, and the run summary reports `triage_mode`, `analysis_sources`, and `local_fallbacks` so silent degradation under rate limits is visible.
+- **The LLM never sees a raw event.** `build_alert_context` / `build_candidate_context` / `build_enrichment_context` in `soc/triage.py` emit only allowlisted fields (`ALERT_CONTEXT_FIELDS`, `RAW_CONTEXT_FIELDS`, …), truncate every string to `MAX_CONTEXT_FIELD_CHARS`, cap clusters at `MAX_CONTEXT_ALERTS`, and exclude `Alert.raw`, `IncidentCandidate.related_events`, and enrichment provider raw responses entirely. Adding a field to a model does **not** add it to the prompt — extend the allowlist deliberately.
+- **The prompt lives in Python, not in a file.** `TRIAGE_SYSTEM_PROMPT` and `TRIAGE_PROMPT_VERSION` in `soc/triage.py`. Bump the version whenever the prompt changes; it is recorded on every result so eval runs stay attributable.
+- **Score is the single source of truth for routing.** `soc/router.py` always derives the action from the score via `page_threshold=8` / `queue_threshold=4`. `TriageResult.action` records what the model or local scorer *suggested* but does not decide anything; when the two disagree, `RoutingDecision.message` says so.
+- **IDs are deterministic content fingerprints**, not random: `CAND-YYYYMMDD-NNN-<hash>` from clustering, similar schemes in `normalizer._build_alert_id`, `triage._build_triage_id`, `router._build_routing_decision_id`. Report filenames are `{candidate.id}.md`. Reruns of the same input therefore produce the same IDs and overwrite the same reports.
+- **Dedup is content-based and persistent.** `soc/dedup.py` builds keys (raw event, alert, source+source_id, payload fingerprint) stored with a TTL in the SQLite `dedup_keys` table. A second run over the same fixture is a no-op unless you pass `--no-dedup` or use a fresh `--db`.
+- **`SQLiteStore.initialize()` migrates before it creates.** `CREATE TABLE IF NOT EXISTS` leaves older databases on their original schema, so `_apply_column_migrations` runs first and `ALTER TABLE`s any column listed in `_ADDED_COLUMNS` that is missing. Order matters: indexes in `_SCHEMA_SQL` may reference columns that only exist after migration. When you add a column to an existing table, add it to both places.
+
+### Configuration
+
+`soc/config.py` exposes a frozen `Settings` dataclass built from env vars via `get_settings(env_file, reload=False)`. Two things to know:
+
+- **It caches in a module-level global `_cached_settings`.** Always pass `reload=True` when the environment may have changed — `run_pipeline.py` does, and tests do too.
+- **Validation is opt-in per subsystem** (`validate_wazuh`, `validate_openrouter`, `validate_email`, …) rather than at load time, so replay mode works with an empty `.env`. Call the relevant validator when adding a live integration.
+
+Several vars have legacy aliases (`WAZUH_MANAGER_URL` falls back to `WAZUH_HOST`, etc.) and `.env.example` documents every key, including ones for not-yet-built phases (Splunk HEC, OpenBSD pf, enrichment providers).
+
+Config tests write a throwaway `.env.test` under `tmp_path` and `monkeypatch.delenv` the keys under test — real env vars leak into `get_settings` otherwise.
+
+### Wazuh ingestion
+
+`WazuhClient` (`soc/wazuh_client.py`) is Manager-only and has two independent halves:
+
+- `WazuhAlertJsonReader` — the actual alert source. Reads line-delimited `alerts.json` from `WAZUH_ALERT_JSON_PATH`, filters by lookback window and `WAZUH_MIN_LEVEL`, sorts, and keeps the newest `WAZUH_ALERT_LIMIT`. If not running on the Manager host, the file must be copied/mounted locally first.
+- `WazuhManagerClient` — optional, HTTP API against `:55000`, used *only* for agent inventory context to enrich alerts. Absent credentials, `fetch_agent_inventory()` returns `{}` and ingestion still works.
+
+`from_settings` hard-requires `WAZUH_ALERT_SOURCE=json_logs`; indexer-based ingestion settings exist in `Settings` but no indexer client does. `WazuhClient.fetch_recent_events` accepts `lookback_minutes`/`min_level`/`limit` for CLI compatibility and **ignores them** — the reader already holds those values from settings.
+
+## Conventions
+
+- Every module, class, and function carries a docstring with explicit `Inputs:` / `Outputs:` (and `Raises:` where relevant) sections. Match this style; it is uniform across all ~15k lines.
+- `from __future__ import annotations` at the top of every module; modern generic syntax (`list[str]`, `X | None`), `JsonDict = dict[str, Any]` alias per module.
+- Each module defines its own exception subclass (`NormalizationError`, `TriageError`, `WazuhError`, `PipelineError`, …) and raises only that from its public surface.
+- Config-holding dataclasses are `frozen=True, slots=True` and validate in `__post_init__`.
+- `soc/__init__.py` re-exports the stable foundation objects with an explicit `__all__` — keep it in sync when adding public models or loaders.
+- One test module per `soc` module (`tests/test_<module>.py`), fixtures in `tests/fixtures/`. Live-integration tests fake the transport rather than hitting the network.
+
+## Not built yet
+
+No placeholder files remain — if a module isn't there, it isn't written. Notably absent: a live Security Onion client (Security Onion *normalization* is implemented and tested; only retrieval is missing), a polling daemon, `INC-*` incident promotion, LLM-drafted report prose, and all external enrichment providers.
+
+`WazuhAlertJsonReader` re-reads the whole `alerts.json` on every run and has no byte cursor or rotation handling, so it is correct for one-shot CLI use and not yet safe for a polling loop (PLAN.md Milestone 1.1a). It does tolerate malformed lines: they are skipped, counted on `last_malformed_line_count`, and logged.
+
+`data/`, `output/`, and `logs/` are gitignored (`.gitkeep` only). `PLAN.md` holds the six-phase roadmap with per-milestone status, a **Known defects** table (verified issues with file locations), and the rationale for current scope — check it before assuming a feature works.

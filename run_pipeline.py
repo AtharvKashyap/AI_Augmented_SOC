@@ -14,8 +14,11 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from soc.config import ConfigError, get_settings
+from soc.models import AnalysisSource
 from soc.notifier import NotificationDispatcher
+from soc.openrouter_client import OpenRouterClient, OpenRouterError
 from soc.pipeline import PipelineConfig, PipelineError, SOCPipeline
+from soc.triage import TriageEngine
 from soc.wazuh_client import WazuhClient, WazuhError
 
 
@@ -99,6 +102,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Raise immediately on the first pipeline error.",
     )
     parser.add_argument(
+        "--no-llm",
+        action="store_true",
+        help="Force deterministic local triage even when an OpenRouter key is configured.",
+    )
+    parser.add_argument(
         "--pretty",
         action="store_true",
         help="Pretty-print JSON summary.",
@@ -159,10 +167,12 @@ def run_from_args(args: argparse.Namespace) -> JsonDict:
         fail_fast=args.fail_fast,
     )
     notifier = NotificationDispatcher.from_settings(settings, dry_run=args.dry_run)
+    triage_engine = _build_triage_engine(settings, use_llm=not args.no_llm)
     pipeline = SOCPipeline.with_sqlite_store(
         db_path,
         config=config,
         notifier=notifier,
+        triage_engine=triage_engine,
     )
 
     source_mode = _source_mode(args)
@@ -188,7 +198,63 @@ def run_from_args(args: argparse.Namespace) -> JsonDict:
     summary["reports_written"] = [str(path) for path in result.report_paths]
     summary["notifications_enabled"] = args.notify
     summary["dry_run"] = args.dry_run
+    triage_mode = "llm" if triage_engine.llm_client is not None else "local"
+    summary["triage_mode"] = triage_mode
+    summary["analysis_sources"] = _count_analysis_sources(result)
+    # Only an LLM-mode run can fall back; a local-mode run scored locally by design.
+    summary["local_fallbacks"] = (
+        summary["analysis_sources"].get(AnalysisSource.LOCAL.value, 0) if triage_mode == "llm" else 0
+    )
     return summary
+
+
+def _build_triage_engine(settings: Any, *, use_llm: bool) -> TriageEngine:
+    """Build the triage engine the pipeline should use.
+
+    LLM triage is used only when it is both requested and configured. A missing
+    API key is a normal operating mode, not an error: the deterministic local
+    engine still produces scores, and the run summary reports which one ran.
+
+    Inputs:
+        settings: Application settings object.
+        use_llm: Whether LLM-assisted triage is permitted for this run.
+
+    Outputs:
+        TriageEngine, with an OpenRouter client attached when available.
+
+    Raises:
+        CliError: If LLM triage is configured but the client cannot be built.
+    """
+
+    if not use_llm or not str(getattr(settings, "openrouter_api_key", "") or "").strip():
+        return TriageEngine()
+
+    try:
+        client = OpenRouterClient.from_settings(settings)
+    except OpenRouterError as exc:
+        raise CliError(f"cannot build OpenRouter client: {exc}") from exc
+    return TriageEngine(client, model=getattr(settings, "openrouter_model", None))
+
+
+def _count_analysis_sources(result: Any) -> JsonDict:
+    """Count triage results by what produced them.
+
+    A run configured for LLM triage that quietly degrades to local scoring under
+    rate limits looks identical to a healthy run without this count.
+
+    Inputs:
+        result: PipelineRunResult from the pipeline.
+
+    Outputs:
+        Mapping of analysis source value to count.
+    """
+
+    counts: JsonDict = {}
+    for item in result.item_results:
+        source = item.triage.analysis_source
+        key = source.value if hasattr(source, "value") else str(source)
+        counts[key] = counts.get(key, 0) + 1
+    return counts
 
 
 def _validate_source_args(args: argparse.Namespace) -> None:

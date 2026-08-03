@@ -111,6 +111,22 @@ class RoutingStatus(str, Enum):
     FAILED = "failed"
 
 
+class AnalysisSource(str, Enum):
+    """What actually produced a triage score.
+
+    A deterministic local score and a model score are not equivalent evidence,
+    and a local score produced by LLM fallback must never be presented as model
+    output. Every TriageResult records which one it is.
+
+    Values:
+        LOCAL: Deterministic local scoring rules.
+        LLM: Language model response, parsed and validated.
+    """
+
+    LOCAL = "local"
+    LLM = "llm"
+
+
 @dataclass(slots=True)
 class WazuhAgent:
     """Endpoint inventory record from Wazuh.
@@ -382,6 +398,8 @@ class TriageResult:
     model: str | None = None
     latency_ms: int | None = None
     token_usage: JsonDict = field(default_factory=dict)
+    analysis_source: AnalysisSource = AnalysisSource.LOCAL
+    prompt_version: str | None = None
     created_at: datetime = field(default_factory=utc_now)
 
     def __post_init__(self) -> None:

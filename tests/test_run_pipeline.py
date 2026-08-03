@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +19,7 @@ import pytest
 import run_pipeline
 from run_pipeline import CliError, build_parser, main, run_from_args
 from soc.config import ConfigError
+from soc.models import AnalysisSource, FalsePositiveLikelihood, TriageAction, TriageResult
 from soc.pipeline import PipelineError
 from soc.wazuh_client import WazuhError
 
@@ -41,6 +42,11 @@ class FakeSettings:
     wazuh_alert_lookback_minutes: int = 5
     wazuh_min_level: int = 7
     wazuh_alert_limit: int = 100
+    openrouter_api_key: str = ""
+    openrouter_base_url: str = "https://openrouter.ai/api/v1"
+    openrouter_model: str = "vendor/model-x"
+    openrouter_site_url: str = ""
+    openrouter_app_name: str = "AI_Augmented_SOC"
 
 
 @dataclass(slots=True)
@@ -61,6 +67,7 @@ class FakeRunResult:
     source_type: str
     source_path: Path | None
     report_paths: list[Path]
+    item_results: list[Any] = field(default_factory=list)
 
     def to_summary(self) -> dict[str, Any]:
         """Return deterministic summary."""
@@ -96,12 +103,19 @@ class FakeSOCPipeline:
     created: list[dict[str, Any]] = []
     last_instance: FakeSOCPipeline | None = None
 
-    def __init__(self, db_path: Path, config: FakePipelineConfig, notifier: FakeNotifierDispatcher) -> None:
+    def __init__(
+        self,
+        db_path: Path,
+        config: FakePipelineConfig,
+        notifier: FakeNotifierDispatcher,
+        triage_engine: Any = None,
+    ) -> None:
         """Initialize fake pipeline."""
 
         self.db_path = db_path
         self.config = config
         self.notifier = notifier
+        self.triage_engine = triage_engine
         self.replay_file_calls: list[Path] = []
         self.replay_directory_calls: list[Path] = []
         self.run_events_calls: list[list[Any]] = []
@@ -114,11 +128,19 @@ class FakeSOCPipeline:
         *,
         config: FakePipelineConfig,
         notifier: FakeNotifierDispatcher,
+        triage_engine: Any = None,
     ) -> FakeSOCPipeline:
         """Record pipeline construction and return fake instance."""
 
-        cls.created.append({"db_path": db_path, "config": config, "notifier": notifier})
-        return cls(db_path, config, notifier)
+        cls.created.append(
+            {
+                "db_path": db_path,
+                "config": config,
+                "notifier": notifier,
+                "triage_engine": triage_engine,
+            }
+        )
+        return cls(db_path, config, notifier, triage_engine)
 
     def run_replay_file(self, path: Path) -> FakeRunResult:
         """Record replay file call."""
@@ -226,6 +248,7 @@ def _args(**overrides: Any) -> argparse.Namespace:
         "no_reports": False,
         "no_dedup": False,
         "fail_fast": False,
+        "no_llm": False,
         "pretty": False,
     }
     values.update(overrides)
@@ -563,3 +586,148 @@ def test_main_returns_130_for_keyboard_interrupt(monkeypatch, tmp_path, capsys):
     captured = capsys.readouterr()
     assert exit_code == 130
     assert "error: interrupted" in captured.err
+
+@dataclass(slots=True)
+class FakeOpenRouterClient:
+    """Fake OpenRouter client factory target."""
+
+    settings: Any
+
+    @classmethod
+    def from_settings(cls, settings: Any, *, model: str | None = None) -> FakeOpenRouterClient:
+        """Record settings used to build the client."""
+
+        return cls(settings=settings)
+
+
+def _triage_result(analysis_source: AnalysisSource) -> TriageResult:
+    """Build a triage result with a chosen analysis source."""
+
+    return TriageResult(
+        id=f"triage-{analysis_source.value}",
+        target_id="candidate-001",
+        target_type="incident_candidate",
+        score=5,
+        fp_likelihood=FalsePositiveLikelihood.MEDIUM,
+        classification="needs_analyst_review",
+        action=TriageAction.QUEUE_REVIEW,
+        summary="Review",
+        analysis_source=analysis_source,
+    )
+
+
+def test_build_parser_accepts_no_llm_flag(tmp_path):
+    """The CLI must be able to force deterministic local triage."""
+
+    replay_file = tmp_path / "replay.json"
+    replay_file.write_text("[]", encoding="utf-8")
+
+    args = build_parser().parse_args(["--replay", str(replay_file), "--no-llm"])
+
+    assert args.no_llm is True
+
+
+def test_run_from_args_uses_llm_triage_when_api_key_is_configured(monkeypatch, tmp_path):
+    """A configured OpenRouter key must actually reach the triage engine."""
+
+    settings = _patch_cli_dependencies(monkeypatch, tmp_path)
+    settings.openrouter_api_key = "test-key"
+    monkeypatch.setattr(run_pipeline, "OpenRouterClient", FakeOpenRouterClient)
+    replay_file = tmp_path / "replay.json"
+    replay_file.write_text("[]", encoding="utf-8")
+
+    summary = run_from_args(_args(replay=replay_file))
+
+    engine = FakeSOCPipeline.created[0]["triage_engine"]
+    assert isinstance(engine.llm_client, FakeOpenRouterClient)
+    assert summary["triage_mode"] == "llm"
+
+
+def test_run_from_args_falls_back_to_local_triage_without_api_key(monkeypatch, tmp_path):
+    """With no key configured, triage must be local and must say so."""
+
+    _patch_cli_dependencies(monkeypatch, tmp_path)
+    replay_file = tmp_path / "replay.json"
+    replay_file.write_text("[]", encoding="utf-8")
+
+    summary = run_from_args(_args(replay=replay_file))
+
+    engine = FakeSOCPipeline.created[0]["triage_engine"]
+    assert engine.llm_client is None
+    assert summary["triage_mode"] == "local"
+
+
+def test_run_from_args_no_llm_flag_overrides_configured_api_key(monkeypatch, tmp_path):
+    """--no-llm must win over a configured key so runs can be forced offline."""
+
+    settings = _patch_cli_dependencies(monkeypatch, tmp_path)
+    settings.openrouter_api_key = "test-key"
+    monkeypatch.setattr(run_pipeline, "OpenRouterClient", FakeOpenRouterClient)
+    replay_file = tmp_path / "replay.json"
+    replay_file.write_text("[]", encoding="utf-8")
+
+    summary = run_from_args(_args(replay=replay_file, no_llm=True))
+
+    assert FakeSOCPipeline.created[0]["triage_engine"].llm_client is None
+    assert summary["triage_mode"] == "local"
+
+
+def test_run_from_args_summary_counts_analysis_sources(monkeypatch, tmp_path):
+    """Silent degradation to local scoring must be visible in the summary."""
+
+    settings = _patch_cli_dependencies(monkeypatch, tmp_path)
+    settings.openrouter_api_key = "test-key"
+    monkeypatch.setattr(run_pipeline, "OpenRouterClient", FakeOpenRouterClient)
+
+    class _MixedPipeline(FakeSOCPipeline):
+        """Fake pipeline returning one LLM-scored and two local-scored items."""
+
+        def run_replay_file(self, path: Path) -> FakeRunResult:
+            """Return a run result with mixed triage provenance."""
+
+            items = [
+                _Item(_triage_result(AnalysisSource.LLM)),
+                _Item(_triage_result(AnalysisSource.LOCAL)),
+                _Item(_triage_result(AnalysisSource.LOCAL)),
+            ]
+            return FakeRunResult("file", path, [], items)
+
+    monkeypatch.setattr(run_pipeline, "SOCPipeline", _MixedPipeline)
+    replay_file = tmp_path / "replay.json"
+    replay_file.write_text("[]", encoding="utf-8")
+
+    summary = run_from_args(_args(replay=replay_file))
+
+    assert summary["analysis_sources"] == {"llm": 1, "local": 2}
+    assert summary["local_fallbacks"] == 2
+
+
+@dataclass(slots=True)
+class _Item:
+    """Minimal stand-in for PipelineItemResult carrying only triage."""
+
+    triage: TriageResult
+
+
+def test_run_from_args_reports_no_fallbacks_when_llm_was_never_used(monkeypatch, tmp_path):
+    """A run that never intended to use an LLM has not "fallen back" to anything."""
+
+    _patch_cli_dependencies(monkeypatch, tmp_path)
+
+    class _LocalOnlyPipeline(FakeSOCPipeline):
+        """Fake pipeline returning locally scored items."""
+
+        def run_replay_file(self, path: Path) -> FakeRunResult:
+            """Return a run result with local triage provenance."""
+
+            return FakeRunResult("file", path, [], [_Item(_triage_result(AnalysisSource.LOCAL))])
+
+    monkeypatch.setattr(run_pipeline, "SOCPipeline", _LocalOnlyPipeline)
+    replay_file = tmp_path / "replay.json"
+    replay_file.write_text("[]", encoding="utf-8")
+
+    summary = run_from_args(_args(replay=replay_file))
+
+    assert summary["triage_mode"] == "local"
+    assert summary["analysis_sources"] == {"local": 1}
+    assert summary["local_fallbacks"] == 0
