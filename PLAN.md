@@ -194,7 +194,7 @@ The human-in-the-loop was asserted but absent, and analyst disagreement is the o
 - [x] The pipeline enqueues only `queue_review` results. Paged results are already in front of an analyst; likely-benign results stay searchable without demanding attention. An enqueue failure is recorded without discarding the run.
 - [x] Minimal CLI (`run_review.py`) to list open items, show a queued decision with its evidence, and record a verdict
 - [x] Export recorded verdicts with analyst provenance, so they can never be confused with synthetic labels
-- [~] Feed those verdicts into the 2.5 labeled set — **the export is not yet directly loadable as a labeled set.** A verdict records *how a score was wrong*; a labeled case needs a replayable fixture and an expected score band. A conversion step is required and is tracked as Milestone 2.5a. Until it exists, the feedback loop that justified building 2.4a before 2.5 is not closed.
+- [x] Feed those verdicts into the 2.5 labeled set — via Milestone 2.5a. `run_review.py promote` converts verdicts into loadable labeled cases, closing the loop that justified building 2.4a before 2.5.
 
 #### Milestone 2.5 — Evaluation harness and labeled set *(new)*
 The gap that mattered most: nothing distinguished good triage from bad, so no prompt or model change was measurable. `soc/evaluation.py` plus the `run_eval.py` CLI.
@@ -212,12 +212,15 @@ The gap that mattered most: nothing distinguished good triage from bad, so no pr
 1. **`private_ip` was treated as a score-raising risk factor.** Local enrichment tags every internal address with it, so each internal IP added +1 — inflating every internal-only alert, which is most alerts in a SOC. A routine internal SSH login scored 4 and landed in the review queue. Fixed via `NON_ESCALATING_RISK_FACTORS`: the tag remains as context but no longer raises a score.
 2. **Log filenames were extracted as domain IOCs.** `auth.log` parses as a domain because `.log` looks like a TLD, so a filename became an indicator, polluting reports and inviting the model to reason about a file as infrastructure. Fixed with `NON_DOMAIN_SUFFIXES`, deliberately excluding extensions that are also real TLDs (`.sh`, `.zip`, `.mov`).
 
-#### Milestone 2.5a — Convert analyst verdicts into labeled cases *(new)*
-The missing link between the review queue and the evaluation set. Without it, analyst judgment cannot reach the harness and the labeled set stays synthetic forever.
-- [ ] Reconstruct a replayable fixture from a reviewed target, from the raw events already persisted for it, so a labeled case is self-contained and committable rather than dependent on a live database whose rows age out
-- [ ] Derive an expected score band and acceptable actions from the verdict: `agree` narrows around the score triage gave, `too_high` and `too_low` shift the band in the stated direction, and an explicit `analyst_score` takes precedence over any inference
-- [ ] Carry the analyst's notes through as the required rationale, and mark provenance `analyst_reviewed`
-- [ ] Add a CLI path so promoting reviewed items into the labeled set is one command
+#### Milestone 2.5a — Convert analyst verdicts into labeled cases *(new)* — **complete**
+The missing link between the review queue and the evaluation set. Without it, analyst judgment could not reach the harness and the labeled set would stay synthetic forever.
+- [x] Reconstruct a replayable fixture from a reviewed target, using the raw events already persisted for it (`SQLiteStore.list_raw_events_for_target`), so a labeled case is self-contained and committable rather than dependent on a live database whose rows age out
+- [x] Derive an expected score band and acceptable actions from the verdict: `agree` narrows around the score triage gave, `too_high` and `too_low` open the band on the side the analyst indicated rather than inventing a number they never gave, and an explicit `analyst_score` takes precedence over any inference
+- [x] Carry the analyst's notes through as the required rationale, synthesizing one when notes are absent, and mark provenance `analyst_reviewed`
+- [x] Skip reviewed items whose source events are no longer recoverable, and report how many were skipped — a case that cannot be replayed cannot be scored
+- [x] `run_review.py promote --labels PATH` does it in one command, and a test covers the seam between the two CLIs
+
+Verified end to end with real components: pipeline run → item queued at score 4 → analyst records `too_high` with score 2 → promoted to a case with band `[1, 3]` and provenance `analyst_reviewed` → evaluation reports `is_analyst_validated: true` and flags the case out of band, because triage said 4 and the analyst said 3 or less. The disagreement is now a measurable signal rather than a lost opinion.
 
 **Open finding, deliberately not "fixed":** the Suricata trojan-download-cradle case scores 6 against a labeled band of 7–10 — the local heuristic under-weights a network IDS malware signature. Its action still falls in the acceptable set. Tuning the scorer to hit a number we invented ourselves would be circular, so this is recorded as a finding for a real labeled set to confirm or refute.
 

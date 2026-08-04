@@ -407,6 +407,192 @@ def load_labeled_cases(path: str | Path) -> list[LabeledCase]:
     return sorted(cases, key=lambda case: case.id)
 
 
+def promote_reviews_to_labels(
+    store: Any,
+    *,
+    labels_path: str | Path,
+    fixtures_dir: str | Path,
+) -> list[JsonDict]:
+    """Turn analyst-reviewed queue items into loadable labeled cases.
+
+    This is the link that makes the labeled set improvable. A verdict on its own
+    records *how* a score was wrong; a labeled case needs a replayable fixture
+    and an expected band. This reconstructs the fixture from the raw events the
+    store already kept, so each case is self-contained and committable rather
+    than dependent on a database whose rows age out.
+
+    Items whose source events are no longer recoverable are skipped: a case that
+    cannot be replayed cannot be scored.
+
+    Inputs:
+        store: Store exposing `list_reviewed_queue_items` and
+            `list_raw_events_for_target`.
+        labels_path: JSON file to write the labeled cases to.
+        fixtures_dir: Directory to write reconstructed replay fixtures into.
+
+    Outputs:
+        The label records written, in the order written.
+    """
+
+    labels_file = Path(labels_path).expanduser()
+    fixture_root = Path(fixtures_dir).expanduser()
+    fixture_root.mkdir(parents=True, exist_ok=True)
+    labels_file.parent.mkdir(parents=True, exist_ok=True)
+
+    records: list[JsonDict] = []
+    for item in store.list_reviewed_queue_items():
+        raw_events = store.list_raw_events_for_target(item.target_id, item.target_type)
+        if not raw_events:
+            continue
+
+        fixture_path = fixture_root / f"{_slug(item.target_id)}.json"
+        fixture_path.write_text(
+            json.dumps([_replay_event(event) for event in raw_events], indent=2, sort_keys=True)
+            + "\n",
+            encoding="utf-8",
+        )
+        records.append(_label_record_from_review(item, fixture_path))
+
+    labels_file.write_text(json.dumps(records, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return records
+
+
+def _label_record_from_review(item: Any, fixture_path: Path) -> JsonDict:
+    """Build one label record from a reviewed queue item.
+
+    Inputs:
+        item: Reviewed ReviewQueueItem.
+        fixture_path: Path of the reconstructed replay fixture.
+
+    Outputs:
+        Label record dictionary.
+    """
+
+    score_min, score_max = _expected_band_from_review(item)
+    actions = sorted(
+        {
+            _action_for_score(score_min).value,
+            _action_for_score(score_max).value,
+        }
+    )
+    verdict = item.analyst_verdict.value if item.analyst_verdict else "unknown"
+
+    rationale = (item.notes or "").strip()
+    if not rationale:
+        rationale = (
+            f"Analyst recorded '{verdict}' for a triage score of {item.score} "
+            "without further notes."
+        )
+
+    return {
+        "id": f"review-{_slug(item.triage_result_id)}",
+        "provenance": LabelProvenance.ANALYST_REVIEWED.value,
+        "fixture": str(fixture_path),
+        "expected_score_min": score_min,
+        "expected_score_max": score_max,
+        "expected_actions": actions,
+        "expected_classification": None,
+        "rationale": rationale,
+        "source_verdict": verdict,
+        "source_triage_score": item.score,
+        "source_analyst_score": item.analyst_score,
+        "source_triage_result_id": item.triage_result_id,
+    }
+
+
+def _expected_band_from_review(item: Any) -> tuple[int, int]:
+    """Derive an expected score band from an analyst verdict.
+
+    An explicit analyst score is the strongest evidence available and takes
+    precedence over any inference. Otherwise the verdict's direction is used:
+    agreement narrows around the score triage gave, while `too_high` and
+    `too_low` open the band on the side the analyst indicated rather than
+    inventing a specific number the analyst never gave.
+
+    Inputs:
+        item: Reviewed ReviewQueueItem.
+
+    Outputs:
+        Tuple of expected minimum and maximum score.
+    """
+
+    score = _clamp_score(item.score)
+
+    if item.analyst_score is not None:
+        analyst_score = _clamp_score(item.analyst_score)
+        return _clamp_score(analyst_score - 1), _clamp_score(analyst_score + 1)
+
+    verdict = item.analyst_verdict.value if item.analyst_verdict else ""
+    if verdict == "too_high":
+        return 1, _clamp_score(score - 1)
+    if verdict == "too_low":
+        return _clamp_score(score + 1), 10
+    return _clamp_score(score - 1), _clamp_score(score + 1)
+
+
+def _action_for_score(score: int) -> TriageAction:
+    """Map a score to the action the router would apply.
+
+    Inputs:
+        score: Score from 1 to 10.
+
+    Outputs:
+        TriageAction the router would select.
+    """
+
+    from soc.router import action_from_score
+
+    return action_from_score(score)
+
+
+def _replay_event(raw_event: JsonDict) -> JsonDict:
+    """Convert a stored raw event into a replay-file event.
+
+    Inputs:
+        raw_event: Stored raw event dictionary.
+
+    Outputs:
+        Replay event dictionary the replay loader accepts.
+    """
+
+    event: JsonDict = {
+        "id": raw_event.get("id"),
+        "source": raw_event.get("source"),
+        "payload": raw_event.get("payload") or {},
+    }
+    timestamp = raw_event.get("timestamp")
+    if timestamp:
+        event["timestamp"] = timestamp
+    return event
+
+
+def _clamp_score(score: int) -> int:
+    """Clamp a score into the 1-10 scale.
+
+    Inputs:
+        score: Any integer score.
+
+    Outputs:
+        Score within 1 to 10.
+    """
+
+    return max(1, min(10, int(score)))
+
+
+def _slug(value: str) -> str:
+    """Build a filesystem-safe slug from an identifier.
+
+    Inputs:
+        value: Identifier to slugify.
+
+    Outputs:
+        Slug containing only safe characters.
+    """
+
+    safe = "".join(char if char.isalnum() or char in "-_" else "-" for char in value)
+    return safe.strip("-") or "unknown"
+
+
 def evaluate_cases(
     cases: Iterable[LabeledCase],
     *,

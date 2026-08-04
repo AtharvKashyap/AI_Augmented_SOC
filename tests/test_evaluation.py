@@ -284,3 +284,242 @@ def test_shipped_labeled_set_runs_through_real_local_triage():
     assert report.is_analyst_validated is False
     summary = report.to_summary()
     assert json.loads(json.dumps(summary))["cases_evaluated"] == report.cases_evaluated
+
+
+def _seed_reviewed_item(
+    tmp_path: Path,
+    *,
+    verdict: str,
+    triage_score: int = 6,
+    analyst_score: int | None = None,
+    notes: str | None = "analyst note",
+):
+    """Seed a store with one reviewed queue item and its source raw event."""
+
+    from datetime import datetime, timezone
+
+    from soc.models import (
+        Alert,
+        AlertSeverity,
+        AnalystVerdict,
+        EventSource,
+        FalsePositiveLikelihood,
+        IncidentCandidate,
+        RawEvent,
+        TriageAction,
+        TriageResult,
+    )
+    from soc.store import SQLiteStore
+
+    moment = datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc)
+    store = SQLiteStore(tmp_path / "soc.db")
+    store.initialize()
+
+    raw = RawEvent(
+        id="raw-review-001",
+        source=EventSource.WAZUH,
+        received_at=moment,
+        timestamp=moment,
+        payload={"rule": {"level": 10, "description": "Reviewed rule"}, "agent": {"id": "001"}},
+    )
+    alert = Alert(
+        id="alert-review-001",
+        source=EventSource.WAZUH,
+        timestamp=moment,
+        severity=AlertSeverity.HIGH,
+        rule_name="Reviewed rule",
+        raw_event_id=raw.id,
+    )
+    candidate = IncidentCandidate(
+        id="CAND-review-001", first_seen=moment, last_seen=moment, alerts=[alert]
+    )
+    triage = TriageResult(
+        id="triage-review-001",
+        target_id=candidate.id,
+        target_type="incident_candidate",
+        score=triage_score,
+        fp_likelihood=FalsePositiveLikelihood.MEDIUM,
+        classification="needs_analyst_review",
+        action=TriageAction.QUEUE_REVIEW,
+        summary="Needs a human decision.",
+    )
+    store.save_raw_event(raw)
+    store.save_alert(alert)
+    store.save_incident_candidate(candidate)
+    store.save_triage_result(triage)
+    store.enqueue_for_review(triage)
+    store.record_analyst_verdict(
+        triage.id,
+        verdict=AnalystVerdict(verdict),
+        analyst_score=analyst_score,
+        notes=notes,
+    )
+    return store
+
+
+def test_promote_reviews_writes_a_loadable_labeled_case(tmp_path):
+    """A reviewed verdict must become a labeled case the harness can load.
+
+    This is the whole point of building the review queue before the harness: if
+    analyst judgment cannot reach the labeled set, the set stays synthetic and
+    the system can never be shown to improve.
+    """
+
+    from soc.evaluation import promote_reviews_to_labels
+
+    store = _seed_reviewed_item(tmp_path, verdict="too_high", analyst_score=2)
+    labels_path = tmp_path / "labels" / "analyst.json"
+
+    records = promote_reviews_to_labels(
+        store,
+        labels_path=labels_path,
+        fixtures_dir=tmp_path / "labels" / "fixtures",
+    )
+
+    assert len(records) == 1
+    cases = load_labeled_cases(labels_path)
+    assert len(cases) == 1
+    assert cases[0].provenance is LabelProvenance.ANALYST_REVIEWED
+    assert cases[0].fixture.exists()
+
+
+def test_promoted_case_is_scoreable_end_to_end(tmp_path):
+    """The reconstructed fixture must actually replay through triage."""
+
+    from soc.evaluation import promote_reviews_to_labels
+
+    store = _seed_reviewed_item(tmp_path, verdict="agree")
+    labels_path = tmp_path / "labels.json"
+    promote_reviews_to_labels(
+        store, labels_path=labels_path, fixtures_dir=tmp_path / "fixtures"
+    )
+
+    report = evaluate_cases(load_labeled_cases(labels_path))
+
+    assert report.cases_evaluated == 1
+    assert report.is_analyst_validated is True
+
+
+def test_analyst_score_takes_precedence_over_inference(tmp_path):
+    """An explicit analyst score is better evidence than any inference."""
+
+    from soc.evaluation import promote_reviews_to_labels
+
+    store = _seed_reviewed_item(tmp_path, verdict="too_low", triage_score=3, analyst_score=9)
+    labels_path = tmp_path / "labels.json"
+
+    records = promote_reviews_to_labels(
+        store, labels_path=labels_path, fixtures_dir=tmp_path / "fixtures"
+    )
+
+    assert records[0]["expected_score_min"] <= 9 <= records[0]["expected_score_max"]
+    assert records[0]["expected_score_min"] >= 8
+
+
+def test_too_high_without_a_score_shifts_the_band_down(tmp_path):
+    """A directional verdict alone still constrains the expected band."""
+
+    from soc.evaluation import promote_reviews_to_labels
+
+    store = _seed_reviewed_item(tmp_path, verdict="too_high", triage_score=8, analyst_score=None)
+    labels_path = tmp_path / "labels.json"
+
+    records = promote_reviews_to_labels(
+        store, labels_path=labels_path, fixtures_dir=tmp_path / "fixtures"
+    )
+
+    assert records[0]["expected_score_max"] < 8
+    assert records[0]["expected_score_min"] == 1
+
+
+def test_too_low_without_a_score_shifts_the_band_up(tmp_path):
+    """The mirror case must shift the other way."""
+
+    from soc.evaluation import promote_reviews_to_labels
+
+    store = _seed_reviewed_item(tmp_path, verdict="too_low", triage_score=4, analyst_score=None)
+    labels_path = tmp_path / "labels.json"
+
+    records = promote_reviews_to_labels(
+        store, labels_path=labels_path, fixtures_dir=tmp_path / "fixtures"
+    )
+
+    assert records[0]["expected_score_min"] > 4
+    assert records[0]["expected_score_max"] == 10
+
+
+def test_agree_narrows_the_band_around_the_triage_score(tmp_path):
+    """Agreement means the score triage gave was about right."""
+
+    from soc.evaluation import promote_reviews_to_labels
+
+    store = _seed_reviewed_item(tmp_path, verdict="agree", triage_score=6)
+    labels_path = tmp_path / "labels.json"
+
+    records = promote_reviews_to_labels(
+        store, labels_path=labels_path, fixtures_dir=tmp_path / "fixtures"
+    )
+
+    assert records[0]["expected_score_min"] <= 6 <= records[0]["expected_score_max"]
+    assert records[0]["expected_score_max"] - records[0]["expected_score_min"] <= 2
+
+
+def test_analyst_notes_become_the_rationale(tmp_path):
+    """The analyst's own words are the best available rationale."""
+
+    from soc.evaluation import promote_reviews_to_labels
+
+    store = _seed_reviewed_item(tmp_path, verdict="too_high", notes="Known nightly backup job.")
+    labels_path = tmp_path / "labels.json"
+
+    records = promote_reviews_to_labels(
+        store, labels_path=labels_path, fixtures_dir=tmp_path / "fixtures"
+    )
+
+    assert "Known nightly backup job." in records[0]["rationale"]
+
+
+def test_promotion_still_produces_a_rationale_without_notes(tmp_path):
+    """A rationale is required, so one must be synthesized when notes are absent."""
+
+    from soc.evaluation import promote_reviews_to_labels
+
+    store = _seed_reviewed_item(tmp_path, verdict="wrong_class", notes=None)
+    labels_path = tmp_path / "labels.json"
+
+    records = promote_reviews_to_labels(
+        store, labels_path=labels_path, fixtures_dir=tmp_path / "fixtures"
+    )
+
+    assert records[0]["rationale"].strip()
+    assert load_labeled_cases(labels_path)
+
+
+def test_promotion_skips_targets_with_no_recoverable_events(tmp_path):
+    """A verdict whose source events are gone cannot become a labeled case."""
+
+    from soc.models import AnalystVerdict, FalsePositiveLikelihood, TriageAction, TriageResult
+    from soc.evaluation import promote_reviews_to_labels
+    from soc.store import SQLiteStore
+
+    store = SQLiteStore(tmp_path / "soc.db")
+    store.initialize()
+    triage = TriageResult(
+        id="triage-orphan",
+        target_id="CAND-gone",
+        target_type="incident_candidate",
+        score=5,
+        fp_likelihood=FalsePositiveLikelihood.MEDIUM,
+        classification="needs_analyst_review",
+        action=TriageAction.QUEUE_REVIEW,
+        summary="Orphaned.",
+    )
+    store.save_triage_result(triage)
+    store.enqueue_for_review(triage)
+    store.record_analyst_verdict(triage.id, verdict=AnalystVerdict.AGREE)
+
+    records = promote_reviews_to_labels(
+        store, labels_path=tmp_path / "labels.json", fixtures_dir=tmp_path / "fixtures"
+    )
+
+    assert records == []

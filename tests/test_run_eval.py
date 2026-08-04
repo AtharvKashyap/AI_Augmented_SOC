@@ -138,3 +138,90 @@ def test_main_reports_thresholds_without_failing_by_default(tmp_path, capsys):
 
     assert exit_code == 0
     assert "threshold unmet" in capsys.readouterr().err
+
+
+def test_promote_command_writes_a_loadable_labeled_set(tmp_path, capsys):
+    """`run_review.py promote` must produce a set the eval CLI can consume.
+
+    This is the seam between the two CLIs: if it breaks, analyst judgment stops
+    reaching the evaluation harness and the labeled set stays synthetic.
+    """
+
+    from datetime import datetime, timezone
+
+    import run_review
+    from soc.models import (
+        Alert,
+        AlertSeverity,
+        AnalystVerdict,
+        EventSource,
+        FalsePositiveLikelihood,
+        IncidentCandidate,
+        RawEvent,
+        TriageAction,
+        TriageResult,
+    )
+    from soc.store import SQLiteStore
+
+    moment = datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc)
+    db_path = tmp_path / "soc.db"
+    store = SQLiteStore(db_path)
+    store.initialize()
+
+    raw = RawEvent(
+        id="raw-cli-001",
+        source=EventSource.WAZUH,
+        received_at=moment,
+        timestamp=moment,
+        payload={"rule": {"level": 9, "description": "CLI seam rule"}},
+    )
+    alert = Alert(
+        id="alert-cli-001",
+        source=EventSource.WAZUH,
+        timestamp=moment,
+        severity=AlertSeverity.HIGH,
+        rule_name="CLI seam rule",
+        raw_event_id=raw.id,
+    )
+    candidate = IncidentCandidate(
+        id="CAND-cli-001", first_seen=moment, last_seen=moment, alerts=[alert]
+    )
+    triage = TriageResult(
+        id="triage-cli-001",
+        target_id=candidate.id,
+        target_type="incident_candidate",
+        score=5,
+        fp_likelihood=FalsePositiveLikelihood.MEDIUM,
+        classification="needs_analyst_review",
+        action=TriageAction.QUEUE_REVIEW,
+        summary="Seam test.",
+    )
+    for save in (
+        lambda: store.save_raw_event(raw),
+        lambda: store.save_alert(alert),
+        lambda: store.save_incident_candidate(candidate),
+        lambda: store.save_triage_result(triage),
+        lambda: store.enqueue_for_review(triage),
+    ):
+        save()
+    store.record_analyst_verdict(
+        triage.id, verdict=AnalystVerdict.AGREE, notes="Correctly queued."
+    )
+
+    labels_path = tmp_path / "labels" / "analyst.json"
+    exit_code = run_review.main(
+        [
+            "promote",
+            "--labels",
+            str(labels_path),
+            "--db",
+            str(db_path),
+            "--env-file",
+            str(tmp_path / "missing.env"),
+        ]
+    )
+    capsys.readouterr()
+
+    assert exit_code == 0
+    assert main(["--labels", str(labels_path)]) == 0
+    assert json.loads(capsys.readouterr().out)["is_analyst_validated"] is True

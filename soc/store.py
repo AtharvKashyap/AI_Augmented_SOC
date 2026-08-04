@@ -537,6 +537,57 @@ class SQLiteStore:
                 ),
             )
 
+    def list_raw_events_for_target(self, target_id: str, target_type: str) -> list[JsonDict]:
+        """Return the original raw events behind an alert or incident candidate.
+
+        This exists so a reviewed decision can be turned back into a replayable
+        fixture. A labeled evaluation case must be self-contained and
+        committable rather than depending on a live database whose rows age out.
+
+        Inputs:
+            target_id: Alert ID or incident candidate ID.
+            target_type: Either alert or incident_candidate.
+
+        Outputs:
+            Raw event dictionaries with id, source, timestamps, and payload,
+            oldest first. Empty when the target is unknown.
+        """
+
+        if target_type == "alert":
+            sql = """
+                SELECT r.id, r.source, r.event_timestamp, r.received_at, r.payload_json
+                FROM raw_events r
+                JOIN alerts a ON a.raw_event_id = r.id
+                WHERE a.id = ?
+                ORDER BY r.event_timestamp ASC, r.id ASC
+            """
+        else:
+            sql = """
+                SELECT r.id, r.source, r.event_timestamp, r.received_at, r.payload_json
+                FROM raw_events r
+                JOIN alerts a ON a.raw_event_id = r.id
+                JOIN candidate_alerts ca ON ca.alert_id = a.id
+                WHERE ca.candidate_id = ?
+                ORDER BY r.event_timestamp ASC, r.id ASC
+            """
+
+        with self._connect() as conn:
+            rows = conn.execute(sql, (target_id,)).fetchall()
+
+        events: list[JsonDict] = []
+        for row in rows:
+            payload = json.loads(row["payload_json"])
+            events.append(
+                {
+                    "id": row["id"],
+                    "source": row["source"],
+                    "timestamp": row["event_timestamp"],
+                    "received_at": row["received_at"],
+                    "payload": payload,
+                }
+            )
+        return events
+
     def get_triage_result(self, triage_result_id: str) -> JsonDict | None:
         """Fetch one stored triage result as its full serialized payload.
 

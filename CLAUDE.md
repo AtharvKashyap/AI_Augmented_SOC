@@ -49,7 +49,8 @@ Analyst review queue and triage evaluation:
 python3 run_review.py list                      # open queue, oldest first
 python3 run_review.py show <triage_result_id>   # the decision plus its evidence
 python3 run_review.py verdict <id> --too-high --score 2 --notes "known backup job"
-python3 run_review.py export --output labels.json   # analyst-derived labels for eval
+python3 run_review.py export --output verdicts.json    # raw verdict records
+python3 run_review.py promote --labels labels.json     # verdicts -> loadable eval labels
 
 python3 run_eval.py --pretty                    # local triage vs the labeled set
 python3 run_eval.py --llm                       # model-assisted triage (needs a key)
@@ -98,6 +99,7 @@ Things that only become clear after reading several files:
 - **Never write a label by running the scorer and recording what it said.** That makes the evaluation tautological. Labels come from security judgment or from analyst review; if the scorer disagrees, that is a finding to investigate, not a label to adjust.
 - `EvaluationThresholds` encodes Phase 2's exit criteria as executable checks, and CI gates on them.
 - The shipped set has 5 seed cases, far short of the 40+ the plan calls for. Growing it is a labeling task; the review queue is the intended source.
+- **`export` and `promote` are different things.** `export` writes verdict records; `promote` writes *labeled cases*. A verdict records how a score was wrong, while a labeled case also needs a replayable fixture and an expected band, so `promote` reconstructs the fixture from the raw events the store kept. Only `promote` output is loadable by the harness.
 
 ### The analyst review queue
 

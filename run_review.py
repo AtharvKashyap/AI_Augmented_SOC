@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from soc.config import ConfigError, get_settings
+from soc.evaluation import promote_reviews_to_labels
 from soc.models import AnalystVerdict, ReviewQueueItem
 from soc.store import SQLiteStore, StoreError
 
@@ -147,6 +148,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_shared_arguments(export_parser)
 
+    promote_parser = subparsers.add_parser(
+        "promote",
+        help="Promote recorded verdicts into a loadable evaluation labeled set.",
+    )
+    promote_parser.add_argument(
+        "--labels",
+        type=Path,
+        required=True,
+        help="Path of the labeled-set JSON file to write.",
+    )
+    promote_parser.add_argument(
+        "--fixtures-dir",
+        type=Path,
+        default=None,
+        help="Directory for reconstructed replay fixtures. Defaults to <labels dir>/fixtures.",
+    )
+    _add_shared_arguments(promote_parser)
+
     return parser
 
 
@@ -227,6 +246,8 @@ def run_from_args(args: argparse.Namespace) -> JsonDict:
         summary.update(_run_show(store, args))
     elif args.command == "verdict":
         summary.update(_run_verdict(store, args))
+    elif args.command == "promote":
+        summary.update(_run_promote(store, args))
     elif args.command == "export":
         summary.update(_run_export(store, args))
     else:
@@ -384,6 +405,49 @@ def _run_verdict(store: SQLiteStore, args: argparse.Namespace) -> JsonDict:
         "analyst_verdict": verdict.value,
         "analyst_score": args.score,
         "notes": args.notes,
+    }
+
+
+def _run_promote(store: SQLiteStore, args: argparse.Namespace) -> JsonDict:
+    """Promote recorded verdicts into a labeled set the eval harness can load.
+
+    `export` writes verdicts; this writes *labeled cases*. The difference matters:
+    a verdict records how a score was wrong, while a labeled case also needs a
+    replayable fixture and an expected score band, so this reconstructs the
+    fixture from the raw events the store kept. This is the step that lets
+    analyst judgment actually reach the evaluation harness.
+
+    Inputs:
+        store: Initialized store.
+        args: Parsed argparse namespace carrying --labels and --fixtures-dir.
+
+    Outputs:
+        Summary dictionary describing what was written.
+    """
+
+    labels_path = args.labels
+    fixtures_dir = args.fixtures_dir or labels_path.parent / "fixtures"
+    records = promote_reviews_to_labels(
+        store,
+        labels_path=labels_path,
+        fixtures_dir=fixtures_dir,
+    )
+
+    reviewed = len(store.list_reviewed_queue_items())
+    skipped = reviewed - len(records)
+    print(f"Promoted {len(records)} analyst-reviewed label(s) to {labels_path}")
+    if skipped > 0:
+        print(
+            f"Skipped {skipped} reviewed item(s) whose source events are no longer "
+            "recoverable and therefore cannot be replayed."
+        )
+
+    return {
+        "labels_path": str(labels_path),
+        "fixtures_dir": str(fixtures_dir),
+        "labels_written": len(records),
+        "reviewed_items": reviewed,
+        "skipped_unrecoverable": skipped,
     }
 
 

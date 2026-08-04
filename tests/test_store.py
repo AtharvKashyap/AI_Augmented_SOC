@@ -640,3 +640,70 @@ def test_get_triage_result_returns_none_when_absent(store):
     """A missing triage result is not an error."""
 
     assert store.get_triage_result("nope") is None
+
+
+def test_list_raw_events_for_a_candidate_returns_its_source_events(store):
+    """Rebuilding a replayable fixture needs the original raw events."""
+
+    raw = RawEvent(
+        id="raw-777",
+        source=EventSource.WAZUH,
+        received_at=datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc),
+        timestamp=datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc),
+        payload={"rule": {"level": 10, "description": "Test rule"}},
+    )
+    alert = Alert(
+        id="alert-777",
+        source=EventSource.WAZUH,
+        timestamp=raw.timestamp,
+        severity=AlertSeverity.HIGH,
+        rule_name="Test rule",
+        raw_event_id=raw.id,
+    )
+    candidate = IncidentCandidate(
+        id="CAND-777",
+        first_seen=raw.timestamp,
+        last_seen=raw.timestamp,
+        alerts=[alert],
+    )
+    store.save_raw_event(raw)
+    store.save_alert(alert)
+    store.save_incident_candidate(candidate)
+
+    events = store.list_raw_events_for_target("CAND-777", "incident_candidate")
+
+    assert len(events) == 1
+    assert events[0]["id"] == "raw-777"
+    assert events[0]["payload"]["rule"]["description"] == "Test rule"
+    assert events[0]["source"] == "wazuh"
+
+
+def test_list_raw_events_for_an_alert_target(store):
+    """A single-alert target resolves to its own raw event."""
+
+    raw = RawEvent(
+        id="raw-888",
+        source=EventSource.SECURITY_ONION,
+        received_at=datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc),
+        timestamp=datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc),
+        payload={"event": {"severity": 1}},
+    )
+    alert = Alert(
+        id="alert-888",
+        source=EventSource.SECURITY_ONION,
+        timestamp=raw.timestamp,
+        severity=AlertSeverity.HIGH,
+        raw_event_id=raw.id,
+    )
+    store.save_raw_event(raw)
+    store.save_alert(alert)
+
+    events = store.list_raw_events_for_target("alert-888", "alert")
+
+    assert [event["id"] for event in events] == ["raw-888"]
+
+
+def test_list_raw_events_for_an_unknown_target_is_empty(store):
+    """An unknown target is not an error."""
+
+    assert store.list_raw_events_for_target("nope", "incident_candidate") == []
