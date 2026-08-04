@@ -9,7 +9,7 @@ external threat-intelligence APIs.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -27,8 +27,7 @@ from soc.enrichment import (
 )
 from soc.models import Alert, AlertSeverity, EnrichmentResult, EventSource, IncidentCandidate
 
-
-BASE_TIME = datetime(2026, 6, 10, 12, 0, tzinfo=timezone.utc)
+BASE_TIME = datetime(2026, 6, 10, 12, 0, tzinfo=UTC)
 
 
 def _alert() -> Alert:
@@ -438,3 +437,36 @@ def test_enrich_candidate_convenience_function():
 
     assert results
     assert all(isinstance(result, EnrichmentResult) for result in results)
+
+def test_log_filenames_are_not_extracted_as_domains():
+    """A log filename is not an indicator of compromise.
+
+    `.log` parses as a plausible TLD, so a path like /var/log/auth.log yields a
+    bogus `auth.log` domain IOC. That pollutes reports and is forwarded to the
+    LLM as an indicator, inviting it to reason about a file as infrastructure.
+    """
+
+    indicators = extract_iocs_from_text("Accepted publickey for deploy in /var/log/auth.log")
+
+    domains = [value for indicator_type, value in indicators if indicator_type == "domain"]
+    assert domains == []
+
+
+def test_common_config_and_script_filenames_are_not_domains():
+    """The same filter must cover other everyday non-domain filenames."""
+
+    text = "read sshd_config.conf, ran deploy.ps1, parsed events.json, opened notes.txt"
+
+    domains = [value for kind, value in extract_iocs_from_text(text) if kind == "domain"]
+
+    assert domains == []
+
+
+def test_real_domains_are_still_extracted():
+    """Filtering filenames must not suppress genuine domains."""
+
+    indicators = extract_iocs_from_text("beacon to stage-update.example.net and evil.co.uk")
+
+    domains = [value for kind, value in indicators if kind == "domain"]
+    assert "stage-update.example.net" in domains
+    assert "evil.co.uk" in domains

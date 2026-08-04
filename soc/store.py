@@ -29,20 +29,23 @@ import sqlite3
 from collections.abc import Iterable
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from soc.models import (
     Alert,
+    AnalysisSource,
+    AnalystVerdict,
     IncidentCandidate,
     RawEvent,
+    ReviewQueueItem,
     RoutingDecision,
+    TriageAction,
     TriageResult,
     WazuhAgent,
     utc_now,
 )
-
 
 JsonDict = dict[str, Any]
 
@@ -72,6 +75,63 @@ class StoreStats:
     triage_results: int
     routing_decisions: int
     dedup_keys: int
+
+
+@dataclass(frozen=True, slots=True)
+class IngestCursor:
+    """Persistent read position for one append-only ingestion source.
+
+    A cursor lets an unattended reader resume where the previous cycle stopped
+    instead of re-reading a whole file. The inode and device fields exist so
+    log rotation can be detected: when either changes, the file behind the path
+    is a different file and the offset is meaningless.
+
+    Attributes:
+        source: Logical source name, for example wazuh_alerts_json.
+        path: Absolute path of the file being read.
+        byte_offset: Byte position just past the last fully consumed record.
+        file_identity: Opaque token identifying the file the offset belongs to,
+            combining device and inode. Stored as a non-numeric string on
+            purpose. Windows file IDs are 128-bit, which overflows SQLite's
+            64-bit INTEGER, and a numeric-looking string in a column with
+            INTEGER affinity is silently converted to a float, losing precision
+            and quietly breaking rotation detection. Only equality matters here,
+            never arithmetic.
+        content_fingerprint: Digest of the file's leading bytes, formatted as
+            "<length>:<sha256 hex>". Inode and size cannot detect a log that was
+            truncated in place and refilled to a similar length, which is what
+            copytruncate-style rotation does; comparing the leading bytes can.
+            The length is stored with the digest so a file that later grows past
+            the sampled window is still recognized as the same file.
+        updated_at: Time the cursor was last written, set by the store on load.
+    """
+
+    source: str
+    path: str
+    byte_offset: int
+    file_identity: str | None = None
+    content_fingerprint: str | None = None
+    updated_at: datetime | None = None
+
+    def __post_init__(self) -> None:
+        """Validate cursor fields.
+
+        Inputs:
+            None.
+
+        Outputs:
+            None.
+
+        Raises:
+            StoreError: If the source, path, or byte_offset is invalid.
+        """
+
+        if self.source.strip() == "":
+            raise StoreError("IngestCursor source is required")
+        if self.path.strip() == "":
+            raise StoreError("IngestCursor path is required")
+        if self.byte_offset < 0:
+            raise StoreError("IngestCursor byte_offset cannot be negative")
 
 
 class SQLiteStore:
@@ -110,7 +170,35 @@ class SQLiteStore:
 
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
+            self._apply_column_migrations(conn)
             conn.executescript(_SCHEMA_SQL)
+
+    def _apply_column_migrations(self, conn: sqlite3.Connection) -> None:
+        """Add columns that are missing from an already-created database.
+
+        `CREATE TABLE IF NOT EXISTS` silently leaves older databases on their
+        original schema, so columns added after a database was first created
+        must be applied explicitly. Adding a nullable column is cheap and safe
+        to run on every initialize.
+
+        This runs before the schema script so that indexes defined on newly
+        added columns can be created in the same pass. Tables that do not exist
+        yet are skipped; the schema script creates those complete.
+
+        Inputs:
+            conn: Open SQLite connection.
+
+        Outputs:
+            None. Missing columns are added in place.
+        """
+
+        for table, columns in _ADDED_COLUMNS.items():
+            existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+            if not existing:
+                continue
+            for column, column_type in columns.items():
+                if column not in existing:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")
 
     def upsert_wazuh_agent(self, agent: WazuhAgent) -> None:
         """Insert or update a Wazuh agent inventory record.
@@ -393,10 +481,11 @@ class SQLiteStore:
                 """
                 INSERT OR REPLACE INTO triage_results (
                     id, target_id, target_type, score, fp_likelihood,
-                    classification, action, summary, model, payload_json,
+                    classification, action, summary, model, latency_ms,
+                    analysis_source, prompt_version, payload_json,
                     created_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     result.id,
@@ -408,6 +497,9 @@ class SQLiteStore:
                     result.action.value,
                     result.summary,
                     result.model,
+                    result.latency_ms,
+                    result.analysis_source.value,
+                    result.prompt_version,
                     _to_json(result.to_dict()),
                     _dt_to_text(result.created_at),
                 ),
@@ -447,6 +539,229 @@ class SQLiteStore:
                     _dt_to_text(decision.updated_at),
                 ),
             )
+
+    def list_raw_events_for_target(self, target_id: str, target_type: str) -> list[JsonDict]:
+        """Return the original raw events behind an alert or incident candidate.
+
+        This exists so a reviewed decision can be turned back into a replayable
+        fixture. A labeled evaluation case must be self-contained and
+        committable rather than depending on a live database whose rows age out.
+
+        Inputs:
+            target_id: Alert ID or incident candidate ID.
+            target_type: Either alert or incident_candidate.
+
+        Outputs:
+            Raw event dictionaries with id, source, timestamps, and payload,
+            oldest first. Empty when the target is unknown.
+        """
+
+        if target_type == "alert":
+            sql = """
+                SELECT r.id, r.source, r.event_timestamp, r.received_at, r.payload_json
+                FROM raw_events r
+                JOIN alerts a ON a.raw_event_id = r.id
+                WHERE a.id = ?
+                ORDER BY r.event_timestamp ASC, r.id ASC
+            """
+        else:
+            sql = """
+                SELECT r.id, r.source, r.event_timestamp, r.received_at, r.payload_json
+                FROM raw_events r
+                JOIN alerts a ON a.raw_event_id = r.id
+                JOIN candidate_alerts ca ON ca.alert_id = a.id
+                WHERE ca.candidate_id = ?
+                ORDER BY r.event_timestamp ASC, r.id ASC
+            """
+
+        with self._connect() as conn:
+            rows = conn.execute(sql, (target_id,)).fetchall()
+
+        events: list[JsonDict] = []
+        for row in rows:
+            payload = json.loads(row["payload_json"])
+            events.append(
+                {
+                    "id": row["id"],
+                    "source": row["source"],
+                    "timestamp": row["event_timestamp"],
+                    "received_at": row["received_at"],
+                    "payload": payload,
+                }
+            )
+        return events
+
+    def get_triage_result(self, triage_result_id: str) -> JsonDict | None:
+        """Fetch one stored triage result as its full serialized payload.
+
+        Reviewing a queued decision needs the summary, IOCs, evidence and
+        recommended actions, not just the score, so this returns the stored
+        payload rather than the indexed columns.
+
+        Inputs:
+            triage_result_id: Triage result ID.
+
+        Outputs:
+            Triage result dictionary, or None when not stored.
+        """
+
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT payload_json FROM triage_results WHERE id = ?",
+                (triage_result_id,),
+            ).fetchone()
+
+        if row is None:
+            return None
+        payload = json.loads(row["payload_json"])
+        return payload if isinstance(payload, dict) else None
+
+    def enqueue_for_review(self, result: TriageResult) -> None:
+        """Add a triage result to the analyst review queue.
+
+        Keyed on the triage result ID, which is itself a deterministic content
+        fingerprint, so re-running the pipeline over the same input updates the
+        existing row instead of queueing duplicate work. An already-reviewed item
+        keeps its verdict.
+
+        Inputs:
+            result: TriageResult routed for analyst review.
+
+        Outputs:
+            None. The item is queued if it was not already present.
+        """
+
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO analyst_queue (
+                    triage_result_id, target_id, target_type, score, action,
+                    analysis_source, queued_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(triage_result_id) DO NOTHING
+                """,
+                (
+                    result.id,
+                    result.target_id,
+                    result.target_type,
+                    result.score,
+                    result.action.value,
+                    result.analysis_source.value,
+                    _dt_to_text(utc_now()),
+                ),
+            )
+
+    def list_open_queue_items(self, limit: int | None = None) -> list[ReviewQueueItem]:
+        """Return queue items still awaiting an analyst verdict, oldest first.
+
+        Inputs:
+            limit: Optional maximum number of items to return.
+
+        Outputs:
+            List of open ReviewQueueItem objects.
+        """
+
+        sql = """
+            SELECT * FROM analyst_queue
+            WHERE reviewed_at IS NULL
+            ORDER BY queued_at ASC, triage_result_id ASC
+        """
+        params: tuple[Any, ...] = ()
+        if limit is not None:
+            sql += " LIMIT ?"
+            params = (limit,)
+
+        with self._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [_queue_item_from_row(row) for row in rows]
+
+    def list_reviewed_queue_items(self, limit: int | None = None) -> list[ReviewQueueItem]:
+        """Return queue items an analyst has judged, most recent first.
+
+        These verdicts are the ground truth an evaluation set is built from.
+
+        Inputs:
+            limit: Optional maximum number of items to return.
+
+        Outputs:
+            List of reviewed ReviewQueueItem objects.
+        """
+
+        sql = """
+            SELECT * FROM analyst_queue
+            WHERE reviewed_at IS NOT NULL
+            ORDER BY reviewed_at DESC, triage_result_id ASC
+        """
+        params: tuple[Any, ...] = ()
+        if limit is not None:
+            sql += " LIMIT ?"
+            params = (limit,)
+
+        with self._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [_queue_item_from_row(row) for row in rows]
+
+    def get_queue_item(self, triage_result_id: str) -> ReviewQueueItem | None:
+        """Return one queue item by triage result ID.
+
+        Inputs:
+            triage_result_id: Triage result identifying the queue item.
+
+        Outputs:
+            ReviewQueueItem, or None when not queued.
+        """
+
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM analyst_queue WHERE triage_result_id = ?",
+                (triage_result_id,),
+            ).fetchone()
+        return None if row is None else _queue_item_from_row(row)
+
+    def record_analyst_verdict(
+        self,
+        triage_result_id: str,
+        *,
+        verdict: AnalystVerdict,
+        analyst_score: int | None = None,
+        notes: str | None = None,
+    ) -> None:
+        """Record an analyst's judgment and close the queue item.
+
+        Inputs:
+            triage_result_id: Queue item to close.
+            verdict: The analyst's judgment.
+            analyst_score: Optional score the analyst would have given, 1-10.
+            notes: Optional free-text notes.
+
+        Outputs:
+            None. The item is marked reviewed.
+
+        Raises:
+            StoreError: If the item is not queued or the score is out of range.
+        """
+
+        if analyst_score is not None and not 1 <= analyst_score <= 10:
+            raise StoreError("analyst_score must be between 1 and 10")
+
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE analyst_queue
+                SET reviewed_at = ?, analyst_verdict = ?, analyst_score = ?, notes = ?
+                WHERE triage_result_id = ?
+                """,
+                (
+                    _dt_to_text(utc_now()),
+                    verdict.value,
+                    analyst_score,
+                    notes,
+                    triage_result_id,
+                ),
+            )
+            if cursor.rowcount == 0:
+                raise StoreError(f"{triage_result_id} is not in the review queue")
 
     def has_dedup_key(self, key: str) -> bool:
         """Check whether a deduplication key already exists and is unexpired.
@@ -513,6 +828,74 @@ class SQLiteStore:
             )
             return cursor.rowcount
 
+    def get_ingest_cursor(self, source: str, path: str) -> IngestCursor | None:
+        """Fetch the stored read position for one ingestion source and path.
+
+        Inputs:
+            source: Logical source name, for example wazuh_alerts_json.
+            path: Absolute path of the file being read.
+
+        Outputs:
+            IngestCursor if a cursor was stored, otherwise None.
+        """
+
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT source, path, byte_offset, file_identity,
+                       content_fingerprint, updated_at
+                FROM ingest_cursors
+                WHERE source = ? AND path = ?
+                """,
+                (source, path),
+            ).fetchone()
+
+        if row is None:
+            return None
+
+        return IngestCursor(
+            source=row["source"],
+            path=row["path"],
+            byte_offset=int(row["byte_offset"]),
+            file_identity=None if row["file_identity"] is None else str(row["file_identity"]),
+            content_fingerprint=row["content_fingerprint"],
+            updated_at=_text_to_dt(row["updated_at"]),
+        )
+
+    def upsert_ingest_cursor(self, cursor: IngestCursor) -> None:
+        """Insert or update the read position for one ingestion source and path.
+
+        Inputs:
+            cursor: IngestCursor describing the new read position.
+
+        Outputs:
+            None. The cursor is persisted, keyed by source and path.
+        """
+
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO ingest_cursors (
+                    source, path, byte_offset, file_identity,
+                    content_fingerprint, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(source, path) DO UPDATE SET
+                    byte_offset = excluded.byte_offset,
+                    file_identity = excluded.file_identity,
+                    content_fingerprint = excluded.content_fingerprint,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    cursor.source,
+                    cursor.path,
+                    cursor.byte_offset,
+                    cursor.file_identity,
+                    cursor.content_fingerprint,
+                    _dt_to_text(cursor.updated_at or utc_now()),
+                ),
+            )
+
     def stats(self) -> StoreStats:
         """Return basic row counts for core tables.
 
@@ -562,6 +945,19 @@ class SQLiteStore:
         finally:
             if conn is not None:
                 conn.close()
+
+
+_ADDED_COLUMNS: dict[str, dict[str, str]] = {
+    "ingest_cursors": {
+        "content_fingerprint": "TEXT",
+        "file_identity": "TEXT",
+    },
+    "triage_results": {
+        "latency_ms": "INTEGER",
+        "analysis_source": "TEXT",
+        "prompt_version": "TEXT",
+    },
+}
 
 
 _SCHEMA_SQL = """
@@ -667,9 +1063,15 @@ CREATE TABLE IF NOT EXISTS triage_results (
     action TEXT NOT NULL,
     summary TEXT NOT NULL,
     model TEXT,
+    latency_ms INTEGER,
+    analysis_source TEXT,
+    prompt_version TEXT,
     payload_json TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
+
+CREATE INDEX IF NOT EXISTS idx_triage_results_analysis_source
+    ON triage_results(analysis_source);
 
 CREATE INDEX IF NOT EXISTS idx_triage_results_target
     ON triage_results(target_id, target_type);
@@ -706,7 +1108,62 @@ CREATE TABLE IF NOT EXISTS dedup_keys (
 
 CREATE INDEX IF NOT EXISTS idx_dedup_keys_expires_at
     ON dedup_keys(expires_at);
+
+CREATE TABLE IF NOT EXISTS analyst_queue (
+    triage_result_id TEXT PRIMARY KEY,
+    target_id TEXT NOT NULL,
+    target_type TEXT NOT NULL,
+    score INTEGER NOT NULL,
+    action TEXT NOT NULL,
+    analysis_source TEXT,
+    queued_at TEXT NOT NULL,
+    reviewed_at TEXT,
+    analyst_verdict TEXT,
+    analyst_score INTEGER,
+    notes TEXT,
+    FOREIGN KEY(triage_result_id) REFERENCES triage_results(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_analyst_queue_open
+    ON analyst_queue(reviewed_at, queued_at);
+
+CREATE TABLE IF NOT EXISTS ingest_cursors (
+    source TEXT NOT NULL,
+    path TEXT NOT NULL,
+    byte_offset INTEGER NOT NULL,
+    file_identity TEXT,
+    content_fingerprint TEXT,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (source, path)
+);
 """
+
+
+def _queue_item_from_row(row: Any) -> ReviewQueueItem:
+    """Build a ReviewQueueItem from a database row.
+
+    Inputs:
+        row: SQLite row from the analyst_queue table.
+
+    Outputs:
+        ReviewQueueItem instance.
+    """
+
+    verdict = row["analyst_verdict"]
+    source = row["analysis_source"]
+    return ReviewQueueItem(
+        triage_result_id=row["triage_result_id"],
+        target_id=row["target_id"],
+        target_type=row["target_type"],
+        score=int(row["score"]),
+        action=TriageAction(row["action"]),
+        analysis_source=AnalysisSource(source) if source else AnalysisSource.LOCAL,
+        queued_at=_text_to_dt(row["queued_at"]) or utc_now(),
+        reviewed_at=_text_to_dt(row["reviewed_at"]),
+        analyst_verdict=AnalystVerdict(verdict) if verdict else None,
+        analyst_score=None if row["analyst_score"] is None else int(row["analyst_score"]),
+        notes=row["notes"],
+    )
 
 
 def _to_json(value: Any) -> str:
@@ -751,8 +1208,30 @@ def _dt_to_text(value: datetime | None) -> str | None:
     if value is None:
         return None
     if value.tzinfo is None:
-        value = value.replace(tzinfo=timezone.utc)
+        value = value.replace(tzinfo=UTC)
     return value.isoformat()
+
+
+def _text_to_dt(value: str | None) -> datetime | None:
+    """Convert ISO-8601 text from the database into a datetime.
+
+    Inputs:
+        value: ISO-8601 string or None.
+
+    Outputs:
+        Timezone-aware UTC datetime, or None when the value is missing or
+        unparseable.
+    """
+
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 def _count_rows(conn: sqlite3.Connection, table: str) -> int:

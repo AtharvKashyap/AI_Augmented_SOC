@@ -5,22 +5,29 @@
 #
 # What it checks:
 #   - Dependencies install successfully
-#   - Ruff linting passes
+#   - Ruff linting passes, against the rule set pinned in ruff.toml using the
+#     Ruff version pinned in requirements.txt. Both are pinned deliberately: an
+#     unpinned linter turns any upstream release into a red build.
 #   - Unit tests pass with pytest
+#   - Triage quality still meets the labeled-set thresholds
 #   - The replay-driven pipeline CLI runs successfully
 #   - A report artifact can be generated from sample replay data
 #
 # Notes:
 #   This workflow avoids live Wazuh, Security Onion, OpenRouter, SMTP, and Slack
 #   dependencies. It only validates the local replay-driven MVP path.
+#
+#   The evaluation step runs the LOCAL half of the triage evaluation only, so it
+#   needs no API key. The LLM half is opt-in via `run_eval.py --llm` and is not
+#   run here. Note that the shipped labels are synthetic, so a passing step means
+#   local triage is self-consistent with our stated expectations, not that triage
+#   accuracy has been validated against analyst judgment.
 
 name: CI
 
 on:
   push:
-    branches: ["main"]
   pull_request:
-    branches: ["main"]
 
 permissions:
   contents: read
@@ -55,15 +62,18 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install ruff pytest
 
       - name: Run Ruff linting
         run: |
-          ruff check soc tests run_pipeline.py
+          ruff check soc tests run_pipeline.py run_review.py run_eval.py
 
       - name: Run unit tests
         run: |
           pytest tests/ -v
+
+      - name: Evaluate triage against the labeled set
+        shell: bash
+        run: python run_eval.py --fail-under-thresholds --pretty
 
       - name: Run replay CLI smoke test
         shell: bash

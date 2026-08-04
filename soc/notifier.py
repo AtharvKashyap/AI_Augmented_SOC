@@ -24,8 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from soc.config import Settings
-from soc.models import RoutingDecision, TriageResult, utc_now
-
+from soc.models import AnalysisSource, RoutingDecision, TriageResult, utc_now
 
 JsonDict = dict[str, Any]
 
@@ -454,6 +453,7 @@ def build_triage_notification(
         f"Action: {triage.action.value}",
         f"Classification: {triage.classification}",
         f"False-positive likelihood: {_enum_value(triage.fp_likelihood)}",
+        f"Analysis source: {_analysis_source_description(triage)}",
         "",
         triage.summary,
     ]
@@ -482,8 +482,30 @@ def build_triage_notification(
             "score": triage.score,
             "action": triage.action.value,
             "classification": triage.classification,
+            "analysis_source": _enum_value(triage.analysis_source),
+            "model": triage.model,
         },
     )
+
+
+def _analysis_source_description(triage: TriageResult) -> str:
+    """Describe what produced the triage score, for notification bodies.
+
+    An analyst being paged needs to know whether a model or a local heuristic
+    produced the score before acting on it.
+
+    Inputs:
+        triage: TriageResult object.
+
+    Outputs:
+        Human-readable provenance description.
+    """
+
+    if _enum_value(triage.analysis_source) != AnalysisSource.LLM.value:
+        return "deterministic local scoring (no model was consulted)"
+    if triage.model:
+        return f"LLM {triage.model}"
+    return "LLM (model not reported)"
 
 
 def build_slack_payload(message: NotificationMessage) -> JsonDict:

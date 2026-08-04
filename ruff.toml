@@ -1,0 +1,59 @@
+# Ruff configuration for AI_Augmented_SOC.
+#
+# Why this file exists: without it, the enabled rule set is whatever the
+# installed Ruff version happens to default to. Those defaults change between
+# releases, so CI could fail on a release unrelated to any code change. Stating
+# the rule set explicitly makes linting reproducible and makes each suppression
+# a decision we can point at rather than an accident.
+#
+# Keep this in step with the pinned Ruff range in requirements.txt.
+
+target-version = "py311"
+line-length = 120
+
+[lint]
+# Explicit, so a new Ruff release cannot silently add or drop rules.
+select = [
+    "E4",     # import placement
+    "E7",     # statement-level errors
+    "E9",     # syntax/runtime errors
+    "F",      # pyflakes
+    "I",      # import sorting
+    "UP",     # pyupgrade: keep modern syntax
+    "RET",    # return-statement hygiene
+    "SIM",    # simplifiable constructs
+    "FLY",    # static string joins
+    "PYI",    # typing conventions
+    "RUF",    # Ruff-specific correctness rules
+    "PLR0402",  # manual from-import
+]
+
+ignore = [
+    # Deliberate design decision, documented in CLAUDE.md and soc/pipeline.py:
+    # the pipeline, the daemon, and the notifier catch broadly on purpose so one
+    # bad event, one failed poll, or one unwritable log line cannot take down a
+    # run. Errors are accumulated and reported rather than propagated. Narrowing
+    # these would trade resilience for rule compliance.
+    "BLE001",
+    # Deliberate: mutable class attributes on test fakes are the recording
+    # mechanism those fakes exist for.
+    "RUF012",
+    # NOT cosmetic, so not applied as part of a lint cleanup. Rewriting
+    # `class X(str, Enum)` to `StrEnum` changes what `str(member)` and f-string
+    # interpolation produce: "EventSource.WAZUH" becomes "wazuh". Enum values
+    # reach Markdown reports, notification bodies, and SQLite columns in this
+    # project, so that is a behavior change needing its own verified commit
+    # rather than a drive-by fix.
+    "UP042",
+    # Readability preference. Several of these conditionals are clearer as
+    # if/else blocks than as long ternaries.
+    "SIM108",
+]
+
+[lint.per-file-ignores]
+# Test fakes stand in for real transports and stores; requiring Self return
+# types and __all__ sorting on them adds noise without adding safety.
+"tests/*" = ["PYI034"]
+
+[lint.isort]
+known-first-party = ["soc"]

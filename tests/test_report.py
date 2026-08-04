@@ -9,13 +9,14 @@ remaining tolerant of small model field-name changes.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from soc.enrichment import enrich_indicator
 from soc.models import (
     Alert,
     AlertSeverity,
+    AnalysisSource,
     EnrichmentResult,
     EventSource,
     EvidenceItem,
@@ -36,8 +37,7 @@ from soc.report import (
     write_report_file,
 )
 
-
-BASE_TIME = datetime(2026, 6, 10, 12, 0, tzinfo=timezone.utc)
+BASE_TIME = datetime(2026, 6, 10, 12, 0, tzinfo=UTC)
 
 
 def _alert(alert_id: str = "alert-001") -> Alert:
@@ -467,3 +467,26 @@ def test_likely_benign_report_has_low_priority_recommendations():
 
     assert "Mark as likely benign or low priority." in report
     assert "Monitor for recurrence or escalation." in report
+
+def test_candidate_report_labels_local_scoring_as_local():
+    """A deterministically scored report must not imply a model produced it."""
+
+    report = MarkdownReportBuilder().build_candidate_report(_candidate(), _triage())
+
+    assert "deterministic local scoring" in report.lower()
+    assert "Analysis source" in report
+
+
+def test_candidate_report_names_the_model_that_scored_it():
+    """An LLM-scored report must name the model and prompt version."""
+
+    triage = _triage()
+    triage.analysis_source = AnalysisSource.LLM
+    triage.model = "vendor/model-x"
+    triage.prompt_version = "triage-v1"
+
+    report = MarkdownReportBuilder().build_candidate_report(_candidate(), triage)
+
+    assert "vendor/model-x" in report
+    assert "triage-v1" in report
+    assert "deterministic local scoring" not in report.lower()

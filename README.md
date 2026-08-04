@@ -12,11 +12,10 @@
 
 ## What this does
 
-Security teams running Wazuh and Security Onion often need a faster way to consolidate endpoint and network evidence, even when alert volume is low. This project currently provides a tested replay-driven SOC pipeline and CLI, with live Wazuh ingestion as the next implementation phase.
-
-The current MVP foundation:
+Security teams running Wazuh and Security Onion often need a faster way to consolidate endpoint and network evidence, even when alert volume is low. This project currently provides a tested replay-driven SOC pipeline, CLI, and Manager-only Wazuh ingestion path using Wazuh `alerts.json`.
 
 - **Loads replay events** from JSON files or directories so the pipeline can be tested even when the SOC is quiet
+- **Reads live Wazuh alerts** from a Manager-accessible or copied `alerts.json` file through `run_pipeline.py --wazuh`
 - **Normalizes** Wazuh, Security Onion, and generic replay events into a common alert schema
 - **Deduplicates** raw events and alerts using a persistent SQLite-backed deduplication store
 - **Clusters** related alerts into incident candidates using shared hosts, users, source IPs, destination IPs, and rule groups
@@ -31,7 +30,7 @@ The current MVP foundation:
 
 No SOAR platform required. The MVP is intentionally modular: each SOC stage is unit tested separately, and `soc/pipeline.py` coordinates the full workflow end-to-end.
 
-Current live-ingestion status: replay/manual mode is working now. The next phase is real Wazuh integration using the Wazuh Manager API for agent context and the Wazuh Indexer API for alert search. Manual JSON replay is for testing, demos, and low-alert environments; it is not intended to replace live Wazuh polling.
+Current live-ingestion status: replay/manual mode is working, and Manager-only Wazuh ingestion is implemented through `alerts.json`. The Wazuh Manager API is used for optional agent inventory context; alerts are read from `/var/ossec/logs/alerts/alerts.json` or from a copied local file such as `data/alerts.json`. Manual replay remains useful for testing, demos, and low-alert environments.
 
 ---
 
@@ -40,7 +39,7 @@ Current live-ingestion status: replay/manual mode is working now. The next phase
 | Layer | Tool / Module |
 |---|---|
 | Replay / testing | JSON replay files and manual test fixtures |
-| Endpoint detection | Wazuh agents → Wazuh Manager; Wazuh Indexer alert search planned next |
+| Endpoint detection | Wazuh agents → Wazuh Manager; alerts read from Manager `alerts.json` |
 | Network sensor | Security Onion (Suricata, Zeek) |
 | Normalization | `soc/normalizer.py` |
 | Deduplication / persistence | SQLite via `soc/store.py` and `soc/dedup.py` |
@@ -67,8 +66,8 @@ Current live-ingestion status: replay/manual mode is working now. The next phase
 - Python 3.11+
 - `pip` and a virtual environment
 - Optional: OpenRouter API key for LLM-assisted triage: https://openrouter.ai
-- Optional next phase: Wazuh Manager API reachable from the SOC automation host, usually `https://<manager>:55000`
-- Optional next phase: Wazuh Indexer API reachable from the SOC automation host, usually `https://<indexer>:9200`
+- Optional live Wazuh mode: Wazuh Manager API reachable from the SOC automation host, usually `https://<manager>:55000`
+- Optional live Wazuh mode: readable Wazuh `alerts.json`, either on the Manager host at `/var/ossec/logs/alerts/alerts.json` or copied locally to a path such as `data/alerts.json`
 - Optional later phase: Security Onion accessible from the SOC automation host
 - Optional: SMTP credentials for email report delivery
 - Optional: Slack-compatible webhook URL for notifications
@@ -116,18 +115,18 @@ OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
 OPENROUTER_MODEL=openrouter/free
 OPENROUTER_REPORT_MODEL=
 
-# Optional next phase: live Wazuh access
+# Optional live Wazuh access
 WAZUH_MANAGER_URL=https://your-wazuh-manager:55000
 WAZUH_MANAGER_USER=wazuh-wui
 WAZUH_MANAGER_PASSWORD=your-password
 WAZUH_MANAGER_VERIFY_TLS=false
 
-WAZUH_INDEXER_URL=https://your-wazuh-indexer:9200
-WAZUH_INDEXER_USER=admin
-WAZUH_INDEXER_PASSWORD=your-password
-WAZUH_INDEXER_VERIFY_TLS=false
-WAZUH_ALERT_INDEX=wazuh-alerts-*
-WAZUH_ALERT_LIMIT=100
+# Manager-only Wazuh alert ingestion
+WAZUH_ALERT_SOURCE=json_logs
+WAZUH_ALERT_JSON_PATH=data/alerts.json
+WAZUH_ALERT_LOOKBACK_MINUTES=1440
+WAZUH_ALERT_LIMIT=20
+WAZUH_MIN_LEVEL=0
 
 # Optional live Security Onion access
 SECURITYONION_HOST=https://your-securityonion
@@ -140,8 +139,6 @@ Optional `.env` values:
 ```text
 POLL_INTERVAL_SECONDS=120
 ALERT_LOOKBACK_MINUTES=5
-WAZUH_MIN_LEVEL=7
-WAZUH_ALERT_LOOKBACK_MINUTES=5
 SO_MIN_SEVERITY=2
 
 VIRUSTOTAL_API_KEY=
@@ -278,37 +275,46 @@ python3 run_pipeline.py \
 
 `run_pipeline.py` is intentionally thin and delegates the real workflow to `soc.pipeline.SOCPipeline`.
 
-### Planned live Wazuh mode
+### Run live Wazuh mode with Manager `alerts.json`
 
-The next implementation phase is live Wazuh ingestion. The intended command will be:
+Live Wazuh ingestion is available through Manager-only `alerts.json` mode. If this project runs on the Wazuh Manager host, point `WAZUH_ALERT_JSON_PATH` at `/var/ossec/logs/alerts/alerts.json`. If running from your laptop, copy the file first:
+
+```bash
+mkdir -p data
+scp user@YOUR_WAZUH_MANAGER:/var/ossec/logs/alerts/alerts.json data/alerts.json
+```
+
+Set `.env`:
+
+```text
+WAZUH_ALERT_SOURCE=json_logs
+WAZUH_ALERT_JSON_PATH=data/alerts.json
+WAZUH_ALERT_LOOKBACK_MINUTES=1440
+WAZUH_ALERT_LIMIT=20
+WAZUH_MIN_LEVEL=0
+```
+
+Then run:
 
 ```bash
 python3 run_pipeline.py \
   --wazuh \
-  --db data/soc.db \
+  --db data/wazuh_test.db \
   --output output \
   --pretty
 ```
 
-The planned Wazuh flow is:
+The Wazuh flow is:
 
 ```text
-Wazuh Manager API :55000  -> authentication, manager status, agent inventory
-Wazuh Indexer API :9200   -> query wazuh-alerts-* for recent alerts
-soc/wazuh_client.py       -> convert alert hits into RawEvent objects
+Wazuh agents              -> send events to Wazuh Manager
+Wazuh alerts.json         -> stores line-delimited JSON alerts
+Wazuh Manager API :55000  -> optional authentication and agent inventory context
+soc/wazuh_client.py       -> reads alerts.json and converts alerts into RawEvent objects
 soc/pipeline.py           -> normalize, dedup, cluster, enrich, triage, route, report
 ```
 
-Replay mode remains useful for repeatable tests and demos, but live Wazuh mode should remove the need to manually copy alerts into JSON files.
-
-### Legacy planned entry points
-
-These scripts are still useful names for later phases, but the current orchestration layer should drive them:
-
-```bash
-python3 run_triage.py --once
-python3 run_report.py --incident-id INC-20240610-001
-```
+Replay mode remains useful for repeatable tests and demos. For Manager-only deployments without Indexer access, live Wazuh mode currently uses a readable or copied `alerts.json` file.
 
 Reports are written to the configured `OUTPUT_DIR` as Markdown and can be delivered by dry-run, SMTP email, or Slack-compatible webhook notifications.
 
@@ -337,9 +343,7 @@ AI_Augmented_SOC/
 │
 ├── assets.csv                  # Asset inventory with business context
 │
-├── run_pipeline.py             # CLI wrapper for replay-driven pipeline runs
-├── run_triage.py               # Planned live polling / one-shot triage entry point
-├── run_report.py               # Planned standalone report drafting entry point
+├── run_pipeline.py             # CLI wrapper for replay and Wazuh alerts.json pipeline runs
 │
 ├── soc/                        # Core package
 │   ├── __init__.py
@@ -347,8 +351,7 @@ AI_Augmented_SOC/
 │   ├── models.py               # Dataclasses: Alert, RawEvent, IncidentCandidate, TriageResult, Report
 │   ├── store.py                # SQLite persistence for SOC objects and dedup keys
 │   ├── pipeline.py             # End-to-end SOC workflow orchestration
-│   ├── wazuh_client.py         # Planned Wazuh Manager + Indexer client
-│   ├── security_onion_client.py # Security Onion alert/log queries
+│   ├── wazuh_client.py         # Wazuh Manager client + alerts.json reader
 │   ├── openrouter_client.py    # OpenRouter chat completion wrapper
 │   ├── normalizer.py           # Merge and normalize to common alert schema
 │   ├── clustering.py           # Group related alerts into incident candidates
@@ -359,10 +362,6 @@ AI_Augmented_SOC/
 │   ├── report.py               # Markdown incident report generation
 │   ├── replay.py               # Sample/manual alert replay for testing low-alert SOCs
 │   └── notifier.py             # Dry-run, SMTP email, Slack-compatible webhook delivery
-│
-├── prompts/
-│   ├── triage_prompt.txt       # Triage system prompt (externalized)
-│   └── report_prompt.txt       # Report drafting system prompt
 │
 ├── output/                     # Generated reports
 │   └── .gitkeep
@@ -386,8 +385,7 @@ AI_Augmented_SOC/
     ├── test_report.py
     ├── test_notifier.py
     ├── test_pipeline.py
-    ├── test_wazuh_client.py              # planned / next phase
-    ├── test_security_onion_client.py     # planned / next phase
+    ├── test_wazuh_client.py              # Wazuh Manager + alerts.json tests
     └── fixtures/
         ├── sample_wazuh_alert.json
         ├── sample_so_alert.json
@@ -419,6 +417,7 @@ The current foundation is heavily unit tested. At this stage, the project valida
 | `soc/report.py` | Markdown incident report generation |
 | `soc/notifier.py` | Dry-run, SMTP, and Slack-compatible notifications |
 | `soc/pipeline.py` | End-to-end orchestration |
+| `soc/wazuh_client.py` | Wazuh Manager API client and `alerts.json` reader |
 | `run_pipeline.py` | CLI wrapper for replay file and replay directory execution |
 ---
 
@@ -437,13 +436,13 @@ The current foundation is heavily unit tested. At this stage, the project valida
 | Routing | Working |
 | Markdown reports | Working |
 | Dry-run/SMTP/Slack notification layer | Working |
-| Live Wazuh Manager API client | Planned next |
-| Live Wazuh Indexer alert search | Planned next |
+| Live Wazuh Manager API client | Working for auth and optional agent inventory context |
+| Live Wazuh `alerts.json` ingestion | Working and unit tested |
 | Live Security Onion client | Planned after Wazuh |
 | PDF reports | Planned polish feature |
 | Splunk/OpenBSD integrations | Later phase |
 
-The project is currently a replay-driven MVP with a working end-to-end SOC workflow. The next build phase is `soc/wazuh_client.py` and `tests/test_wazuh_client.py`.
+The project is currently a replay-driven and Wazuh-`alerts.json`-capable MVP with a working end-to-end SOC workflow. The next build phase is live Security Onion ingestion, deeper enrichment providers, and optional remote fetching of Wazuh `alerts.json` over SSH/SFTP.
 
 ---
 
@@ -478,9 +477,7 @@ Markdown is used as the source report format because it is easy to diff, test, r
 
 ---
 
-## Limitations
-
-- Live Wazuh ingestion is planned next. The current tested path is replay-driven pipeline execution through `run_pipeline.py`.
+- Live Wazuh ingestion currently supports Manager-only `alerts.json` mode. If the project is not running on the Wazuh Manager host, `alerts.json` must be copied or mounted locally before running `--wazuh`.
 - Triage scoring is LLM-assisted when configured and should be treated as analyst guidance, not ground truth. Human review of queued alerts is expected.
 - Low-alert SOC environments should use replay fixtures and manual test events to validate the pipeline before relying on live alerts.
 - OpenRouter free models may have rate limits, availability limits, or model-quality variation. Use a paid or pinned model for production-like testing.
@@ -517,6 +514,16 @@ python3 run_pipeline.py \
   --db data/soc.db \
   --output output \
   --no-dedup \
+  --pretty
+```
+
+Run the Wazuh Manager-only live mode after copying or mounting `alerts.json`:
+
+```bash
+python3 run_pipeline.py \
+  --wazuh \
+  --db data/wazuh_test.db \
+  --output output \
   --pretty
 ```
 

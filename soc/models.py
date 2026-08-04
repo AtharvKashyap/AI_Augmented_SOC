@@ -24,10 +24,9 @@ The main flow is:
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 from typing import Any
-
 
 JsonDict = dict[str, Any]
 
@@ -39,7 +38,7 @@ def utc_now() -> datetime:
         A timezone-aware UTC datetime.
     """
 
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 class EventSource(str, Enum):
@@ -109,6 +108,43 @@ class RoutingStatus(str, Enum):
     QUEUED = "queued"
     MARKED_LIKELY_BENIGN = "marked_likely_benign"
     FAILED = "failed"
+
+
+class AnalystVerdict(str, Enum):
+    """An analyst's judgment of a triage result after reviewing it.
+
+    This is the only ground truth the system gets for free, and it is what turns
+    an evaluation set from synthetic into real. The values describe how the
+    triage score was wrong rather than only whether it was, because "scored too
+    high" and "wrong classification" call for different fixes.
+
+    Values:
+        AGREE: The score and action were appropriate.
+        TOO_HIGH: Over-scored; real severity was lower.
+        TOO_LOW: Under-scored; this deserved more urgency.
+        WRONG_CLASS: Roughly the right urgency, wrong characterization.
+    """
+
+    AGREE = "agree"
+    TOO_HIGH = "too_high"
+    TOO_LOW = "too_low"
+    WRONG_CLASS = "wrong_class"
+
+
+class AnalysisSource(str, Enum):
+    """What actually produced a triage score.
+
+    A deterministic local score and a model score are not equivalent evidence,
+    and a local score produced by LLM fallback must never be presented as model
+    output. Every TriageResult records which one it is.
+
+    Values:
+        LOCAL: Deterministic local scoring rules.
+        LLM: Language model response, parsed and validated.
+    """
+
+    LOCAL = "local"
+    LLM = "llm"
 
 
 @dataclass(slots=True)
@@ -315,6 +351,58 @@ class IncidentCandidate:
 
 
 @dataclass(slots=True)
+class ReviewQueueItem:
+    """One triage decision awaiting or holding an analyst's judgment.
+
+    Routing a result to the analyst queue is not the same as it being reviewable:
+    without a record an analyst can work and close, "queued for review" is a
+    claim with nothing behind it. This model is that record, and the verdict it
+    captures is the seed of a real evaluation set.
+
+    Attributes:
+        triage_result_id: Triage result under review. Also the queue identity, so
+            re-running the pipeline over the same input cannot double-queue.
+        target_id: Alert or incident candidate ID.
+        target_type: Type of target, usually alert or incident_candidate.
+        score: Score the triage engine assigned.
+        action: Action the router applied.
+        analysis_source: Whether a model or the local rules produced the score.
+        queued_at: When the item entered the queue.
+        reviewed_at: When an analyst recorded a verdict, or None while open.
+        analyst_verdict: The analyst's judgment, or None while open.
+        analyst_score: The score the analyst would have given, when supplied.
+        notes: Free-text analyst notes.
+    """
+
+    triage_result_id: str
+    target_id: str
+    target_type: str
+    score: int
+    action: TriageAction
+    analysis_source: AnalysisSource = AnalysisSource.LOCAL
+    queued_at: datetime = field(default_factory=utc_now)
+    reviewed_at: datetime | None = None
+    analyst_verdict: AnalystVerdict | None = None
+    analyst_score: int | None = None
+    notes: str | None = None
+
+    @property
+    def is_open(self) -> bool:
+        """Return whether the item still needs an analyst decision."""
+
+        return self.reviewed_at is None
+
+    def to_dict(self) -> JsonDict:
+        """Serialize the queue item into a JSON-compatible dictionary.
+
+        Returns:
+            Dictionary representation of the queue item.
+        """
+
+        return _serialize_dataclass(self)
+
+
+@dataclass(slots=True)
 class EvidenceItem:
     """Specific evidence supporting an AI triage or report claim.
 
@@ -382,6 +470,8 @@ class TriageResult:
     model: str | None = None
     latency_ms: int | None = None
     token_usage: JsonDict = field(default_factory=dict)
+    analysis_source: AnalysisSource = AnalysisSource.LOCAL
+    prompt_version: str | None = None
     created_at: datetime = field(default_factory=utc_now)
 
     def __post_init__(self) -> None:

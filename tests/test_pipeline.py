@@ -11,13 +11,13 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import pytest
-from soc.enrichment import enrich_indicator
 
+from soc.enrichment import enrich_indicator
 from soc.models import (
     Alert,
     AlertSeverity,
@@ -40,9 +40,9 @@ from soc.pipeline import (
     run_replay_directory,
     run_replay_file,
 )
+from soc.router import RoutingConfig, TriageRouter
 
-
-BASE_TIME = datetime(2026, 6, 10, 12, 0, tzinfo=timezone.utc)
+BASE_TIME = datetime(2026, 6, 10, 12, 0, tzinfo=UTC)
 
 
 def _raw_event(event_id: str = "raw-001") -> RawEvent:
@@ -197,8 +197,10 @@ class FakeStore:
     candidates: list[IncidentCandidate] = field(default_factory=list)
     triage_results: list[TriageResult] = field(default_factory=list)
     routing_decisions: list[RoutingDecision] = field(default_factory=list)
+    queued_for_review: list[TriageResult] = field(default_factory=list)
     fail_on_initialize: bool = False
     fail_on_save_alert: bool = False
+    fail_on_enqueue: bool = False
 
     def initialize(self) -> None:
         """Record initialization."""
@@ -233,6 +235,13 @@ class FakeStore:
         """Record routing save."""
 
         self.routing_decisions.append(decision)
+
+    def enqueue_for_review(self, result: TriageResult) -> None:
+        """Record review-queue enqueue."""
+
+        if self.fail_on_enqueue:
+            raise RuntimeError("enqueue failed")
+        self.queued_for_review.append(result)
 
 
 @dataclass(slots=True)
@@ -775,3 +784,58 @@ def test_pipeline_config_rejects_empty_output_dir():
 
     with pytest.raises(PipelineError, match="output_dir"):
         PipelineConfig(output_dir=Path(""))
+
+def test_pipeline_queues_review_actions_for_an_analyst():
+    """A queue_review routing decision must create reviewable analyst work.
+
+    Writing a routing row without queueing anything an analyst can close makes
+    "queued for review" a claim with nothing behind it.
+    """
+
+    store = FakeStore()
+    pipeline = SOCPipeline(
+        config=PipelineConfig(output_dir=Path("unused"), write_reports=False),
+        store=store,
+        router=TriageRouter(RoutingConfig(page_threshold=10, queue_threshold=1)),
+    )
+
+    result = pipeline.run_events([_raw_event()])
+
+    assert result.item_results
+    queued_actions = {item.routing.action for item in result.item_results}
+    assert queued_actions == {TriageAction.QUEUE_REVIEW}
+    assert [queued.id for queued in store.queued_for_review] == [
+        item.triage.id for item in result.item_results
+    ]
+
+
+def test_pipeline_does_not_queue_paged_or_benign_actions():
+    """Only review-bound results belong in the analyst queue."""
+
+    store = FakeStore()
+    pipeline = SOCPipeline(
+        config=PipelineConfig(output_dir=Path("unused"), write_reports=False),
+        store=store,
+        router=TriageRouter(RoutingConfig(page_threshold=1, queue_threshold=1)),
+    )
+
+    result = pipeline.run_events([_raw_event()])
+
+    assert {item.routing.action for item in result.item_results} == {TriageAction.PAGE_NOW}
+    assert store.queued_for_review == []
+
+
+def test_pipeline_records_an_enqueue_failure_without_losing_the_run():
+    """A queue write failure must not discard an otherwise complete result."""
+
+    store = FakeStore(fail_on_enqueue=True)
+    pipeline = SOCPipeline(
+        config=PipelineConfig(output_dir=Path("unused"), write_reports=False),
+        store=store,
+        router=TriageRouter(RoutingConfig(page_threshold=10, queue_threshold=1)),
+    )
+
+    result = pipeline.run_events([_raw_event()])
+
+    assert result.item_results
+    assert any("review queue" in error for error in result.errors)

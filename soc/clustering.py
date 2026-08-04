@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from soc.models import Alert, IncidentCandidate, utc_now
@@ -294,7 +294,7 @@ def _alert_time(alert: Alert) -> datetime | None:
     if alert.timestamp is None:
         return None
     if alert.timestamp.tzinfo is None:
-        return alert.timestamp.replace(tzinfo=timezone.utc)
+        return alert.timestamp.replace(tzinfo=UTC)
     return alert.timestamp
 
 
@@ -308,7 +308,7 @@ def _alert_sort_key(alert: Alert) -> tuple[datetime, str]:
         Tuple of timestamp and alert ID.
     """
 
-    timestamp = _alert_time(alert) or datetime.min.replace(tzinfo=timezone.utc)
+    timestamp = _alert_time(alert) or datetime.min.replace(tzinfo=UTC)
     return timestamp, alert.id
 
 

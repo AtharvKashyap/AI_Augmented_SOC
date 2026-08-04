@@ -25,7 +25,6 @@ from typing import Any
 
 from soc.config import Settings
 
-
 JsonDict = dict[str, Any]
 
 

@@ -12,7 +12,7 @@ validate field extraction without requiring live Wazuh or Security Onion.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from soc.models import AlertSeverity, EventSource, RawEvent
 from soc.normalizer import (
@@ -36,7 +36,7 @@ def test_normalize_wazuh_event_extracts_common_fields():
     event = RawEvent(
         id="raw-wazuh-001",
         source=EventSource.WAZUH,
-        timestamp=datetime(2026, 6, 10, 12, 0, tzinfo=timezone.utc),
+        timestamp=datetime(2026, 6, 10, 12, 0, tzinfo=UTC),
         payload={
             "id": "1750000000.12345",
             "timestamp": "2026-06-10T12:01:00Z",
@@ -68,7 +68,7 @@ def test_normalize_wazuh_event_extracts_common_fields():
 
     assert alert.id == "wazuh:1750000000.12345"
     assert alert.source == EventSource.WAZUH
-    assert alert.timestamp == datetime(2026, 6, 10, 12, 1, tzinfo=timezone.utc)
+    assert alert.timestamp == datetime(2026, 6, 10, 12, 1, tzinfo=UTC)
     assert alert.severity == AlertSeverity.HIGH
     assert alert.source_severity == 10
     assert alert.rule_name == "Suspicious PowerShell execution"
@@ -117,7 +117,7 @@ def test_normalize_wazuh_event_supports_flattened_fields():
     alert = Normalizer().normalize(event)
 
     assert alert.id == "wazuh:indexer-doc-001"
-    assert alert.timestamp == datetime(2026, 6, 10, 13, 0, tzinfo=timezone.utc)
+    assert alert.timestamp == datetime(2026, 6, 10, 13, 0, tzinfo=UTC)
     assert alert.severity == AlertSeverity.CRITICAL
     assert alert.source_severity == "12"
     assert alert.rule_name == "Possible credential dumping"
@@ -143,7 +143,7 @@ def test_normalize_security_onion_suricata_event_extracts_common_fields():
     event = RawEvent(
         id="raw-so-001",
         source=EventSource.SECURITY_ONION,
-        timestamp=datetime(2026, 6, 10, 14, 0, tzinfo=timezone.utc),
+        timestamp=datetime(2026, 6, 10, 14, 0, tzinfo=UTC),
         payload={
             "_id": "so-doc-001",
             "@timestamp": "2026-06-10T14:05:00Z",
@@ -166,7 +166,7 @@ def test_normalize_security_onion_suricata_event_extracts_common_fields():
 
     assert alert.id == "security_onion:so-doc-001"
     assert alert.source == EventSource.SECURITY_ONION
-    assert alert.timestamp == datetime(2026, 6, 10, 14, 5, tzinfo=timezone.utc)
+    assert alert.timestamp == datetime(2026, 6, 10, 14, 5, tzinfo=UTC)
     assert alert.severity == AlertSeverity.HIGH
     assert alert.source_severity == 1
     assert alert.rule_name == "ET TROJAN Possible C2 Traffic"
@@ -248,7 +248,7 @@ def test_normalize_generic_replay_event_extracts_common_fields():
 
     assert alert.id == "replay:manual-alert-001"
     assert alert.source == EventSource.REPLAY
-    assert alert.timestamp == datetime(2026, 6, 10, 15, 0, tzinfo=timezone.utc)
+    assert alert.timestamp == datetime(2026, 6, 10, 15, 0, tzinfo=UTC)
     assert alert.severity == AlertSeverity.CRITICAL
     assert alert.source_severity == "critical"
     assert alert.rule_name == "Manual critical test alert"
@@ -387,7 +387,7 @@ def test_timestamp_falls_back_to_raw_event_timestamp_when_payload_missing():
         None. Assertion verifies timestamp fallback behavior.
     """
 
-    raw_time = datetime(2026, 6, 10, 16, 0, tzinfo=timezone.utc)
+    raw_time = datetime(2026, 6, 10, 16, 0, tzinfo=UTC)
     event = RawEvent(
         id="raw-001",
         source=EventSource.REPLAY,
@@ -419,4 +419,4 @@ def test_naive_timestamp_is_converted_to_utc():
 
     alert = Normalizer().normalize(event)
 
-    assert alert.timestamp == datetime(2026, 6, 10, 17, 0, tzinfo=timezone.utc)
+    assert alert.timestamp == datetime(2026, 6, 10, 17, 0, tzinfo=UTC)

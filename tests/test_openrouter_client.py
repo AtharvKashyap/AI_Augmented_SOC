@@ -68,7 +68,7 @@ class FakeResponse:
             None.
         """
 
-        return None
+        return
 
     def read(self) -> bytes:
         """Return fake response body bytes.

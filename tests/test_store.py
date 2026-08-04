@@ -12,13 +12,15 @@ isolated, repeatable, and safe to run in CI.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
 from soc.models import (
     Alert,
     AlertSeverity,
+    AnalysisSource,
+    AnalystVerdict,
     EventSource,
     EvidenceItem,
     FalsePositiveLikelihood,
@@ -30,7 +32,7 @@ from soc.models import (
     TriageResult,
     WazuhAgent,
 )
-from soc.store import SQLiteStore, StoreStats
+from soc.store import IngestCursor, SQLiteStore, StoreError, StoreStats
 
 
 @pytest.fixture
@@ -82,7 +84,7 @@ def test_upsert_and_get_wazuh_agent(store):
         None. Assertions verify upsert and retrieval behavior.
     """
 
-    last_seen = datetime(2026, 6, 10, 12, 0, tzinfo=timezone.utc)
+    last_seen = datetime(2026, 6, 10, 12, 0, tzinfo=UTC)
     agent = WazuhAgent(
         agent_id="001",
         hostname="endpoint-01",
@@ -134,7 +136,7 @@ def test_save_raw_event_and_alert(store):
         None. Assertions verify raw event and alert persistence.
     """
 
-    event_time = datetime(2026, 6, 10, 12, 30, tzinfo=timezone.utc)
+    event_time = datetime(2026, 6, 10, 12, 30, tzinfo=UTC)
     raw_event = RawEvent(
         id="raw-wazuh-001",
         source=EventSource.WAZUH,
@@ -186,7 +188,7 @@ def test_save_incident_candidate_links_alerts(store):
         None. Assertions verify candidate persistence.
     """
 
-    event_time = datetime(2026, 6, 10, 13, 0, tzinfo=timezone.utc)
+    event_time = datetime(2026, 6, 10, 13, 0, tzinfo=UTC)
     alert = Alert(
         id="alert-002",
         source=EventSource.SECURITY_ONION,
@@ -331,3 +333,431 @@ def test_triage_score_must_be_between_one_and_ten():
             action=TriageAction.QUEUE_REVIEW,
             summary="Invalid score test.",
         )
+
+def test_save_triage_result_persists_analysis_provenance(store):
+    """Analysis source and prompt version must be queryable, not buried in JSON."""
+
+    result = TriageResult(
+        id="triage-provenance-001",
+        target_id="CAND-20260610-001",
+        target_type="incident_candidate",
+        score=9,
+        fp_likelihood=FalsePositiveLikelihood.LOW,
+        classification="likely_true_positive",
+        action=TriageAction.PAGE_NOW,
+        summary="Model scored this as an active compromise.",
+        model="vendor/model-x",
+        latency_ms=1234,
+        analysis_source=AnalysisSource.LLM,
+        prompt_version="triage-v1",
+    )
+
+    store.save_triage_result(result)
+
+    with store._connect() as conn:
+        row = conn.execute(
+            "SELECT analysis_source, prompt_version, latency_ms FROM triage_results WHERE id = ?",
+            (result.id,),
+        ).fetchone()
+
+    assert row["analysis_source"] == "llm"
+    assert row["prompt_version"] == "triage-v1"
+    assert row["latency_ms"] == 1234
+
+
+def test_initialize_adds_provenance_columns_to_existing_database(tmp_path):
+    """An existing database created before provenance existed must be upgraded."""
+
+    db_path = tmp_path / "legacy.db"
+    legacy_store = SQLiteStore(db_path)
+    with legacy_store._connect() as conn:
+        conn.execute(
+            """
+            CREATE TABLE triage_results (
+                id TEXT PRIMARY KEY,
+                target_id TEXT NOT NULL,
+                target_type TEXT NOT NULL,
+                score INTEGER NOT NULL,
+                fp_likelihood TEXT NOT NULL,
+                classification TEXT NOT NULL,
+                action TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                model TEXT,
+                payload_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+
+    SQLiteStore(db_path).initialize()
+
+    with legacy_store._connect() as conn:
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(triage_results)")}
+
+    assert {"analysis_source", "prompt_version", "latency_ms"} <= columns
+
+
+def test_get_ingest_cursor_returns_none_when_absent(store):
+    """An unknown source/path pair should have no stored ingestion cursor.
+
+    Inputs:
+        store: Initialized SQLiteStore fixture.
+
+    Outputs:
+        None. Assertions verify the missing-cursor contract.
+    """
+
+    assert store.get_ingest_cursor("wazuh_alerts_json", "/var/ossec/logs/alerts/alerts.json") is None
+
+
+def test_upsert_and_get_ingest_cursor(store):
+    """An ingestion cursor should round-trip through SQLite.
+
+    Inputs:
+        store: Initialized SQLiteStore fixture.
+
+    Outputs:
+        None. Assertions verify persisted cursor fields.
+    """
+
+    cursor = IngestCursor(
+        source="wazuh_alerts_json",
+        path="/var/ossec/logs/alerts/alerts.json",
+        byte_offset=2048,
+        file_identity="16777220-1234567",
+    )
+
+    store.upsert_ingest_cursor(cursor)
+    loaded = store.get_ingest_cursor("wazuh_alerts_json", "/var/ossec/logs/alerts/alerts.json")
+
+    assert loaded is not None
+    assert loaded.source == "wazuh_alerts_json"
+    assert loaded.path == "/var/ossec/logs/alerts/alerts.json"
+    assert loaded.byte_offset == 2048
+    assert loaded.file_identity == "16777220-1234567"
+    assert loaded.updated_at is not None
+
+
+def test_upsert_ingest_cursor_updates_existing_row(store):
+    """Re-upserting the same source/path pair should advance the offset in place.
+
+    Inputs:
+        store: Initialized SQLiteStore fixture.
+
+    Outputs:
+        None. Assertions verify a single updated row.
+    """
+
+    store.upsert_ingest_cursor(
+        IngestCursor(source="wazuh_alerts_json", path="/alerts.json", byte_offset=10, file_identity="2-1")
+    )
+    store.upsert_ingest_cursor(
+        IngestCursor(source="wazuh_alerts_json", path="/alerts.json", byte_offset=99, file_identity="4-3")
+    )
+
+    loaded = store.get_ingest_cursor("wazuh_alerts_json", "/alerts.json")
+
+    assert loaded is not None
+    assert loaded.byte_offset == 99
+    assert loaded.file_identity == "4-3"
+
+    with store._connect() as conn:
+        count = conn.execute("SELECT COUNT(*) AS n FROM ingest_cursors").fetchone()["n"]
+
+    assert count == 1
+
+
+def test_ingest_cursors_are_scoped_by_source_and_path(store):
+    """Cursors for different sources or paths must not collide.
+
+    Inputs:
+        store: Initialized SQLiteStore fixture.
+
+    Outputs:
+        None. Assertions verify per-key isolation.
+    """
+
+    store.upsert_ingest_cursor(IngestCursor(source="wazuh_alerts_json", path="/a.json", byte_offset=1))
+    store.upsert_ingest_cursor(IngestCursor(source="wazuh_alerts_json", path="/b.json", byte_offset=2))
+    store.upsert_ingest_cursor(IngestCursor(source="other_source", path="/a.json", byte_offset=3))
+
+    assert store.get_ingest_cursor("wazuh_alerts_json", "/a.json").byte_offset == 1
+    assert store.get_ingest_cursor("wazuh_alerts_json", "/b.json").byte_offset == 2
+    assert store.get_ingest_cursor("other_source", "/a.json").byte_offset == 3
+
+
+def test_ingest_cursor_rejects_invalid_values():
+    """IngestCursor should validate its own fields.
+
+    Inputs:
+        None.
+
+    Outputs:
+        None. Assertions verify validation errors.
+    """
+
+    with pytest.raises(StoreError, match="source"):
+        IngestCursor(source="", path="/a.json", byte_offset=0)
+
+    with pytest.raises(StoreError, match="path"):
+        IngestCursor(source="wazuh_alerts_json", path="", byte_offset=0)
+
+    with pytest.raises(StoreError, match="byte_offset"):
+        IngestCursor(source="wazuh_alerts_json", path="/a.json", byte_offset=-1)
+
+
+def _queued_triage(result_id: str = "triage-queue-001", score: int = 5) -> TriageResult:
+    """Build a triage result of the kind that lands in the review queue."""
+
+    return TriageResult(
+        id=result_id,
+        target_id="CAND-20260803-001",
+        target_type="incident_candidate",
+        score=score,
+        fp_likelihood=FalsePositiveLikelihood.MEDIUM,
+        classification="needs_analyst_review",
+        action=TriageAction.QUEUE_REVIEW,
+        summary="Needs a human decision.",
+    )
+
+
+def test_enqueue_for_review_creates_an_open_queue_item(store):
+    """Queued triage results must become reviewable work, not just a stored row."""
+
+    triage = _queued_triage()
+    store.save_triage_result(triage)
+
+    store.enqueue_for_review(triage)
+    open_items = store.list_open_queue_items()
+
+    assert len(open_items) == 1
+    assert open_items[0].triage_result_id == triage.id
+    assert open_items[0].target_id == "CAND-20260803-001"
+    assert open_items[0].score == 5
+    assert open_items[0].reviewed_at is None
+    assert open_items[0].analyst_verdict is None
+
+
+def test_enqueue_for_review_is_idempotent(store):
+    """Re-running the pipeline must not queue the same decision twice."""
+
+    triage = _queued_triage()
+    store.save_triage_result(triage)
+
+    store.enqueue_for_review(triage)
+    store.enqueue_for_review(triage)
+
+    assert len(store.list_open_queue_items()) == 1
+
+
+def test_record_analyst_verdict_closes_the_item(store):
+    """A recorded verdict must remove the item from the open queue."""
+
+    triage = _queued_triage()
+    store.save_triage_result(triage)
+    store.enqueue_for_review(triage)
+
+    store.record_analyst_verdict(
+        triage.id,
+        verdict=AnalystVerdict.TOO_HIGH,
+        analyst_score=2,
+        notes="Known backup job.",
+    )
+
+    assert store.list_open_queue_items() == []
+    reviewed = store.list_reviewed_queue_items()
+    assert len(reviewed) == 1
+    assert reviewed[0].analyst_verdict == AnalystVerdict.TOO_HIGH
+    assert reviewed[0].analyst_score == 2
+    assert reviewed[0].notes == "Known backup job."
+    assert reviewed[0].reviewed_at is not None
+
+
+def test_record_analyst_verdict_rejects_an_unknown_item(store):
+    """Recording a verdict for something never queued must fail loudly."""
+
+    with pytest.raises(StoreError, match="not in the review queue"):
+        store.record_analyst_verdict("triage-does-not-exist", verdict=AnalystVerdict.AGREE)
+
+
+def test_record_analyst_verdict_rejects_an_out_of_range_score(store):
+    """An analyst score must obey the same 1-10 scale as triage."""
+
+    triage = _queued_triage()
+    store.save_triage_result(triage)
+    store.enqueue_for_review(triage)
+
+    with pytest.raises(StoreError, match="between 1 and 10"):
+        store.record_analyst_verdict(triage.id, verdict=AnalystVerdict.TOO_LOW, analyst_score=42)
+
+
+def test_open_queue_items_are_oldest_first(store):
+    """Analysts should work the queue in arrival order."""
+
+    for index in range(3):
+        triage = _queued_triage(result_id=f"triage-{index}", score=4 + index)
+        store.save_triage_result(triage)
+        store.enqueue_for_review(triage)
+
+    assert [item.triage_result_id for item in store.list_open_queue_items()] == [
+        "triage-0",
+        "triage-1",
+        "triage-2",
+    ]
+
+
+def test_list_open_queue_items_honours_a_limit(store):
+    """A long queue must be pageable."""
+
+    for index in range(5):
+        triage = _queued_triage(result_id=f"triage-{index}")
+        store.save_triage_result(triage)
+        store.enqueue_for_review(triage)
+
+    assert len(store.list_open_queue_items(limit=2)) == 2
+
+
+def test_get_triage_result_returns_the_full_stored_payload(store):
+    """Reviewing an item needs the triage detail, not just its score."""
+
+    triage = _queued_triage()
+    triage.summary = "Encoded PowerShell reaching a public address."
+    triage.recommended_actions = ["Isolate endpoint-01"]
+    store.save_triage_result(triage)
+
+    stored = store.get_triage_result(triage.id)
+
+    assert stored is not None
+    assert stored["summary"] == "Encoded PowerShell reaching a public address."
+    assert stored["recommended_actions"] == ["Isolate endpoint-01"]
+    assert stored["score"] == 5
+
+
+def test_get_triage_result_returns_none_when_absent(store):
+    """A missing triage result is not an error."""
+
+    assert store.get_triage_result("nope") is None
+
+
+def test_list_raw_events_for_a_candidate_returns_its_source_events(store):
+    """Rebuilding a replayable fixture needs the original raw events."""
+
+    raw = RawEvent(
+        id="raw-777",
+        source=EventSource.WAZUH,
+        received_at=datetime(2026, 8, 3, 12, 0, tzinfo=UTC),
+        timestamp=datetime(2026, 8, 3, 12, 0, tzinfo=UTC),
+        payload={"rule": {"level": 10, "description": "Test rule"}},
+    )
+    alert = Alert(
+        id="alert-777",
+        source=EventSource.WAZUH,
+        timestamp=raw.timestamp,
+        severity=AlertSeverity.HIGH,
+        rule_name="Test rule",
+        raw_event_id=raw.id,
+    )
+    candidate = IncidentCandidate(
+        id="CAND-777",
+        first_seen=raw.timestamp,
+        last_seen=raw.timestamp,
+        alerts=[alert],
+    )
+    store.save_raw_event(raw)
+    store.save_alert(alert)
+    store.save_incident_candidate(candidate)
+
+    events = store.list_raw_events_for_target("CAND-777", "incident_candidate")
+
+    assert len(events) == 1
+    assert events[0]["id"] == "raw-777"
+    assert events[0]["payload"]["rule"]["description"] == "Test rule"
+    assert events[0]["source"] == "wazuh"
+
+
+def test_list_raw_events_for_an_alert_target(store):
+    """A single-alert target resolves to its own raw event."""
+
+    raw = RawEvent(
+        id="raw-888",
+        source=EventSource.SECURITY_ONION,
+        received_at=datetime(2026, 8, 3, 12, 0, tzinfo=UTC),
+        timestamp=datetime(2026, 8, 3, 12, 0, tzinfo=UTC),
+        payload={"event": {"severity": 1}},
+    )
+    alert = Alert(
+        id="alert-888",
+        source=EventSource.SECURITY_ONION,
+        timestamp=raw.timestamp,
+        severity=AlertSeverity.HIGH,
+        raw_event_id=raw.id,
+    )
+    store.save_raw_event(raw)
+    store.save_alert(alert)
+
+    events = store.list_raw_events_for_target("alert-888", "alert")
+
+    assert [event["id"] for event in events] == ["raw-888"]
+
+
+def test_list_raw_events_for_an_unknown_target_is_empty(store):
+    """An unknown target is not an error."""
+
+    assert store.list_raw_events_for_target("nope", "incident_candidate") == []
+
+
+def test_ingest_cursor_persists_windows_scale_file_identifiers(store):
+    """Windows file IDs exceed SQLite's 64-bit INTEGER and must still persist.
+
+    os.stat().st_ino on Windows is a 128-bit file ID. Binding one as an INTEGER
+    raises OverflowError, which made the read cursor -- and therefore the whole
+    daemon -- unusable on Windows.
+
+    Inputs:
+        store: Initialized SQLiteStore fixture.
+
+    Outputs:
+        None. Assertions verify a large identifier round-trips unchanged.
+    """
+
+    huge_identity = f"{2**70}-{2**80 + 12345}"
+    cursor = IngestCursor(
+        source="wazuh_alerts_json",
+        path="C:\\logs\\alerts.json",
+        byte_offset=512,
+        file_identity=huge_identity,
+        content_fingerprint="16:abc123",
+    )
+
+    store.upsert_ingest_cursor(cursor)
+    loaded = store.get_ingest_cursor("wazuh_alerts_json", "C:\\logs\\alerts.json")
+
+    assert loaded is not None
+    assert loaded.file_identity == huge_identity
+    assert loaded.byte_offset == 512
+
+
+def test_ingest_cursor_without_a_stored_identity_still_loads(store):
+    """A cursor row predating file_identity must load rather than fail.
+
+    Inputs:
+        store: Initialized SQLiteStore fixture.
+
+    Outputs:
+        None. Assertion verifies a missing identity reads back as None.
+    """
+
+    with store._connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO ingest_cursors (source, path, byte_offset, updated_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            ("wazuh_alerts_json", "/var/log/alerts.json", 100, "2026-08-04T00:00:00+00:00"),
+        )
+
+    loaded = store.get_ingest_cursor("wazuh_alerts_json", "/var/log/alerts.json")
+
+    assert loaded is not None
+    assert loaded.file_identity is None
+    assert loaded.byte_offset == 100

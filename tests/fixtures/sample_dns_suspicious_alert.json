@@ -1,0 +1,60 @@
+[
+    {
+      "id": "so-zeek-dns-dga-001",
+      "source": "security_onion",
+      "timestamp": "2026-06-10T14:22:30Z",
+      "payload": {
+        "event": {
+          "id": "so-zeek-dns-dga-001",
+          "module": "zeek",
+          "dataset": "zeek.dns",
+          "kind": "alert",
+          "category": [
+            "network",
+            "dns"
+          ],
+          "severity": 2
+        },
+        "@timestamp": "2026-06-10T14:22:30Z",
+        "rule": {
+          "name": "Possible DGA domain lookup from workstation"
+        },
+        "source": {
+          "ip": "10.0.1.42",
+          "port": 53411
+        },
+        "destination": {
+          "ip": "10.0.1.10",
+          "port": 53
+        },
+        "host": {
+          "name": "securityonion-sensor-01"
+        },
+        "network": {
+          "protocol": "dns",
+          "transport": "udp",
+          "direction": "internal"
+        },
+        "dns": {
+          "question": {
+            "name": "z7q4k9v2m8x1p3w6.example.net",
+            "type": "A",
+            "registered_domain": "example.net"
+          },
+          "answers": [],
+          "response_code": "NXDOMAIN"
+        },
+        "zeek": {
+          "dns": {
+            "uid": "CjhGID4nQcgTWjvg4c",
+            "query": "z7q4k9v2m8x1p3w6.example.net",
+            "qtype_name": "A",
+            "rcode_name": "NXDOMAIN",
+            "answers": [],
+            "rejected": true
+          }
+        },
+        "message": "Zeek DNS query from 10.0.1.42 for z7q4k9v2m8x1p3w6.example.net returned NXDOMAIN"
+      }
+    }
+  ]

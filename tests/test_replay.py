@@ -11,11 +11,13 @@ or Security Onion alerts to test the pipeline reliably.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 
-from soc.models import EventSource, RawEvent
+from soc.models import AlertSeverity, EventSource, RawEvent, TriageAction
+from soc.normalizer import Normalizer
 from soc.replay import (
     ReplayError,
     ReplayLoadResult,
@@ -25,6 +27,9 @@ from soc.replay import (
     parse_timestamp,
     raw_event_from_dict,
 )
+from soc.triage import local_triage_alert
+
+FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 
 
 def _write_json(path, payload) -> None:
@@ -76,11 +81,11 @@ def test_load_replay_file_list_format(tmp_path):
     assert all(isinstance(event, RawEvent) for event in events)
     assert events[0].id == "raw-wazuh-001"
     assert events[0].source == EventSource.WAZUH
-    assert events[0].timestamp == datetime(2026, 6, 10, 12, 0, tzinfo=timezone.utc)
+    assert events[0].timestamp == datetime(2026, 6, 10, 12, 0, tzinfo=UTC)
     assert events[0].payload == {"rule": {"level": 10}}
     assert events[1].id == "raw-so-001"
     assert events[1].source == EventSource.SECURITY_ONION
-    assert events[1].timestamp == datetime(2026, 6, 10, 12, 1, tzinfo=timezone.utc)
+    assert events[1].timestamp == datetime(2026, 6, 10, 12, 1, tzinfo=UTC)
 
 
 def test_load_replay_file_object_format(tmp_path):
@@ -272,7 +277,7 @@ def test_parse_timestamp_handles_none_empty_z_and_naive_values():
         10,
         12,
         0,
-        tzinfo=timezone.utc,
+        tzinfo=UTC,
     )
     assert parse_timestamp("2026-06-10T12:00:00") == datetime(
         2026,
@@ -280,7 +285,7 @@ def test_parse_timestamp_handles_none_empty_z_and_naive_values():
         10,
         12,
         0,
-        tzinfo=timezone.utc,
+        tzinfo=UTC,
     )
 
 
@@ -330,7 +335,9 @@ def test_load_replay_file_rejects_invalid_json(tmp_path):
 
 
 def test_load_replay_file_rejects_unsupported_shape(tmp_path):
-    """Replay files must be a list or object with an events list.
+    """Replay files must be an event object, a list, or an events wrapper.
+
+    A JSON scalar is none of those and cannot be interpreted as an event.
 
     Inputs:
         tmp_path: Pytest temporary directory fixture.
@@ -340,10 +347,113 @@ def test_load_replay_file_rejects_unsupported_shape(tmp_path):
     """
 
     replay_file = tmp_path / "bad_shape.json"
+    _write_json(replay_file, "not an event")
+
+    with pytest.raises(ReplayError, match="must be an event object"):
+        load_replay_file(replay_file)
+
+
+def test_load_replay_file_reports_the_real_problem_for_an_objectless_event(tmp_path):
+    """An object with no recognizable event fields fails on its missing payload.
+
+    Since a bare object is now read as a single event, a mistyped wrapper key
+    surfaces as the more precise "missing payload" error rather than a shape
+    error. That is the accurate diagnosis: the object is not a valid event.
+
+    Inputs:
+        tmp_path: Pytest temporary directory fixture.
+
+    Outputs:
+        None. Assertion verifies the error names the payload.
+    """
+
+    replay_file = tmp_path / "no_payload.json"
     _write_json(replay_file, {"not_events": []})
 
-    with pytest.raises(ReplayError, match="events"):
+    with pytest.raises(ReplayError, match="payload"):
         load_replay_file(replay_file)
+
+
+def test_benign_wazuh_fixture_triages_as_likely_benign():
+    """The benign Wazuh replay fixture must score in the likely-benign band.
+
+    Expected labeled verdict (Milestone 2.5 eval seed): BENIGN. A routine sshd
+    authentication success (Wazuh rule level 3, internal source and destination,
+    no process or command line) must normalize to a low-severity Alert and be
+    marked likely benign by deterministic local triage.
+
+    The score is asserted as a band, not an exact value, so heuristic weight
+    tuning in `soc.triage` does not break this test.
+
+    Inputs:
+        None. Reads `tests/fixtures/sample_wazuh_benign_alert.json`.
+
+    Outputs:
+        None. Assertions verify severity, score band, and triage action.
+    """
+
+    events = load_replay_file(FIXTURES_DIR / "sample_wazuh_benign_alert.json")
+
+    assert len(events) == 1
+    assert events[0].source == EventSource.WAZUH
+
+    alert = Normalizer().normalize(events[0])
+
+    assert alert.severity == AlertSeverity.LOW
+    assert alert.source_severity == 3
+    assert alert.rule_name == "sshd: authentication success."
+    assert alert.hostname == "linux-app-01"
+    assert alert.agent_id == "004"
+    assert alert.user == "deploy"
+    assert alert.src_ip == "10.0.1.55"
+    assert alert.dst_ip == "10.0.1.10"
+    assert alert.process_name is None
+    assert alert.command_line is None
+
+    result = local_triage_alert(alert)
+
+    assert result.score <= 3
+    assert result.action == TriageAction.MARK_LIKELY_BENIGN
+
+
+def test_suspicious_dns_fixture_preserves_query_and_addresses():
+    """The suspicious DNS replay fixture must normalize with its DNS context.
+
+    Expected labeled verdict (Milestone 2.5 eval seed): SUSPICIOUS, worth analyst
+    review but not a page. A Zeek DNS lookup of an algorithmically generated
+    domain that returns NXDOMAIN is real beaconing evidence, so the queried
+    domain and both endpoints must survive normalization for triage and
+    enrichment to use them.
+
+    Inputs:
+        None. Reads `tests/fixtures/sample_dns_suspicious_alert.json`.
+
+    Outputs:
+        None. Assertions verify the queried domain and endpoint addresses.
+    """
+
+    events = load_replay_file(FIXTURES_DIR / "sample_dns_suspicious_alert.json")
+
+    assert len(events) == 1
+    assert events[0].source == EventSource.SECURITY_ONION
+
+    alert = Normalizer().normalize(events[0])
+    queried_domain = "z7q4k9v2m8x1p3w6.example.net"
+
+    assert alert.src_ip == "10.0.1.42"
+    assert alert.dst_ip == "10.0.1.10"
+    assert alert.hostname == "securityonion-sensor-01"
+    assert alert.severity == AlertSeverity.MEDIUM
+    assert alert.rule_name == "Possible DGA domain lookup from workstation"
+    assert "dns" in alert.rule_groups
+    assert alert.raw["dns"]["question"]["name"] == queried_domain
+    assert alert.raw["zeek"]["dns"]["query"] == queried_domain
+    assert queried_domain in alert.raw["message"]
+
+    result = local_triage_alert(alert)
+
+    assert result.score >= 4
+    assert result.action != TriageAction.MARK_LIKELY_BENIGN
 
 
 def test_load_replay_directory_rejects_missing_directory(tmp_path):
@@ -358,3 +468,60 @@ def test_load_replay_directory_rejects_missing_directory(tmp_path):
 
     with pytest.raises(ReplayError, match="does not exist"):
         load_replay_directory(tmp_path / "missing_dir")
+
+
+def test_load_replay_file_accepts_a_single_event_object(tmp_path):
+    """A hand-written file holding one event object is valid replay input.
+
+    Manual test events are written by hand, and requiring a one-element list
+    wrapper is friction with no benefit. A bare JSON object is one event.
+
+    Inputs:
+        tmp_path: Pytest temporary directory fixture.
+
+    Outputs:
+        None. Assertion verifies single-object files load.
+    """
+
+    replay_file = tmp_path / "single_event.json"
+    _write_json(
+        replay_file,
+        {
+            "id": "manual-001",
+            "source": "wazuh",
+            "payload": {"rule": {"level": 5, "description": "Test rule"}},
+        },
+    )
+
+    events = load_replay_file(replay_file)
+
+    assert len(events) == 1
+    assert events[0].id == "manual-001"
+
+
+@pytest.mark.parametrize(
+    "fixture_name",
+    [
+        "sample_wazuh_alert.json",
+        "sample_so_alert.json",
+        "sample_wazuh_benign_alert.json",
+        "sample_dns_suspicious_alert.json",
+        "sample_incident_replay.json",
+    ],
+)
+def test_every_repo_fixture_loads_through_the_replay_loader(fixture_name):
+    """Every shipped fixture must be replayable from the CLI.
+
+    A fixture the documented `--replay` path cannot open is not usable evidence,
+    however well it is shaped for direct unit-test use.
+
+    Inputs:
+        fixture_name: Fixture file name under tests/fixtures.
+
+    Outputs:
+        None. Assertion verifies the fixture loads and yields events.
+    """
+
+    events = load_replay_file(Path("tests/fixtures") / fixture_name)
+
+    assert events

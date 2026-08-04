@@ -40,12 +40,11 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from soc.models import EventSource, RawEvent
-
 
 JsonDict = dict[str, Any]
 
@@ -244,7 +243,7 @@ def parse_timestamp(value: Any) -> datetime | None:
         raise ReplayError(f"Invalid replay timestamp: {value}") from exc
 
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
+        parsed = parsed.replace(tzinfo=UTC)
 
     return parsed
 
@@ -289,9 +288,14 @@ def _extract_event_dicts(payload: Any, path: Path) -> list[JsonDict]:
         event_dicts = payload
     elif isinstance(payload, dict) and isinstance(payload.get("events"), list):
         event_dicts = payload["events"]
+    elif isinstance(payload, dict):
+        # A bare object is one event. Manual test events are written by hand and
+        # should not need a one-element list wrapper.
+        event_dicts = [payload]
     else:
         raise ReplayError(
-            f"Replay file {path} must be a list of events or an object with an 'events' list"
+            f"Replay file {path} must be an event object, a list of events, "
+            "or an object with an 'events' list"
         )
 
     for event_dict in event_dicts:

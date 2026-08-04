@@ -12,7 +12,7 @@ labs where alerts may be sparse.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -25,8 +25,7 @@ from soc.clustering import (
 )
 from soc.models import Alert, AlertSeverity, EventSource
 
-
-BASE_TIME = datetime(2026, 6, 10, 12, 0, tzinfo=timezone.utc)
+BASE_TIME = datetime(2026, 6, 10, 12, 0, tzinfo=UTC)
 
 
 def _alert(

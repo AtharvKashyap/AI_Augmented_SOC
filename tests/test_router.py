@@ -130,8 +130,8 @@ def test_action_from_score_rejects_invalid_thresholds():
         action_from_score(5, page_threshold=3, queue_threshold=4)
 
 
-def test_router_respects_triage_action_by_default():
-    """Router should use TriageResult.action when respect_triage_action is True.
+def test_router_derives_action_from_score_by_default():
+    """Router should derive the action from the score by default.
 
     Inputs:
         None.
@@ -146,33 +146,14 @@ def test_router_respects_triage_action_by_default():
 
     assert decision.triage_result_id == "triage-001"
     assert decision.target_id == "alert-001"
-    assert decision.action == TriageAction.QUEUE_REVIEW
-    assert decision.status == RoutingStatus.QUEUED
-    assert decision.destination == "analyst_queue"
-    assert "score 9/10" in decision.message
-    assert "queue_review" in decision.message
-    assert decision.error is None
-    assert decision.id.startswith("route-")
-
-
-def test_router_can_force_score_based_action():
-    """Router should derive action from score when respect_triage_action is False.
-
-    Inputs:
-        None.
-
-    Outputs:
-        None. Assertions verify deterministic score-based routing.
-    """
-
-    result = _triage_result(score=9, action=TriageAction.QUEUE_REVIEW)
-    router = TriageRouter(RoutingConfig(respect_triage_action=False))
-
-    decision = router.route(result)
-
     assert decision.action == TriageAction.PAGE_NOW
     assert decision.status == RoutingStatus.CREATED
     assert decision.destination == "page_now"
+    assert "score 9/10" in decision.message
+    assert "page_now" in decision.message
+    assert "queue_review" in decision.message
+    assert decision.error is None
+    assert decision.id.startswith("route-")
 
 
 def test_router_maps_page_now_to_page_destination():
@@ -273,10 +254,15 @@ def test_route_triage_result_convenience_function():
 
     result = _triage_result(score=8, action=TriageAction.QUEUE_REVIEW)
 
-    decision = route_triage_result(result, respect_triage_action=False)
+    decision = route_triage_result(result)
 
     assert decision.action == TriageAction.PAGE_NOW
     assert decision.destination == "page_now"
+
+    tuned = route_triage_result(result, page_threshold=9, queue_threshold=5)
+
+    assert tuned.action == TriageAction.QUEUE_REVIEW
+    assert tuned.destination == "analyst_queue"
 
 
 def test_routing_decision_id_is_stable_for_same_input():
@@ -298,7 +284,7 @@ def test_routing_decision_id_is_stable_for_same_input():
     assert first.id == second.id
 
 
-def test_routing_decision_id_changes_for_different_action_when_score_based():
+def test_routing_decision_id_changes_when_thresholds_change_action():
     """Routing decision IDs should change when selected action changes.
 
     Inputs:
@@ -310,12 +296,90 @@ def test_routing_decision_id_changes_for_different_action_when_score_based():
 
     result = _triage_result(score=8, action=TriageAction.QUEUE_REVIEW)
 
-    respected = TriageRouter(RoutingConfig(respect_triage_action=True)).route(result)
-    score_based = TriageRouter(RoutingConfig(respect_triage_action=False)).route(result)
+    default_based = TriageRouter().route(result)
+    tuned = TriageRouter(RoutingConfig(page_threshold=9, queue_threshold=5)).route(result)
 
-    assert respected.id != score_based.id
-    assert respected.action == TriageAction.QUEUE_REVIEW
-    assert score_based.action == TriageAction.PAGE_NOW
+    assert default_based.id != tuned.id
+    assert default_based.action == TriageAction.PAGE_NOW
+    assert tuned.action == TriageAction.QUEUE_REVIEW
+
+
+def test_router_prefers_score_over_disagreeing_triage_action():
+    """Score should decide routing even when the triage action disagrees.
+
+    Inputs:
+        None.
+
+    Outputs:
+        None. Assertions verify score-derived routing and disagreement message.
+    """
+
+    result = _triage_result(score=2, action=TriageAction.PAGE_NOW)
+
+    decision = TriageRouter().route(result)
+
+    assert decision.action == TriageAction.MARK_LIKELY_BENIGN
+    assert decision.status == RoutingStatus.MARKED_LIKELY_BENIGN
+    assert decision.destination == "likely_benign"
+    assert "mark_likely_benign" in decision.message
+    assert "page_now" in decision.message
+    assert "suggested" in decision.message.lower()
+
+
+def test_router_message_omits_disagreement_when_actions_agree():
+    """Agreeing triage and score actions should not add a disagreement note.
+
+    Inputs:
+        None.
+
+    Outputs:
+        None. Assertions verify the message stays clean when actions agree.
+    """
+
+    result = _triage_result(score=2, action=TriageAction.MARK_LIKELY_BENIGN)
+
+    decision = TriageRouter().route(result)
+
+    assert decision.action == TriageAction.MARK_LIKELY_BENIGN
+    assert "suggested" not in decision.message.lower()
+
+
+def test_router_threshold_tuning_changes_routing():
+    """Tuning thresholds must visibly change the routing action.
+
+    Inputs:
+        None.
+
+    Outputs:
+        None. Assertions verify thresholds are live, not dead code.
+    """
+
+    result = _triage_result(score=8, action=TriageAction.PAGE_NOW)
+
+    default_decision = TriageRouter().route(result)
+    tuned_decision = TriageRouter(
+        RoutingConfig(page_threshold=9, queue_threshold=5)
+    ).route(result)
+
+    assert default_decision.action == TriageAction.PAGE_NOW
+    assert tuned_decision.action == TriageAction.QUEUE_REVIEW
+    assert tuned_decision.destination == "analyst_queue"
+
+
+def test_routing_config_has_no_respect_triage_action_field():
+    """RoutingConfig should no longer expose respect_triage_action.
+
+    Inputs:
+        None.
+
+    Outputs:
+        None. Assertions verify the field was removed.
+    """
+
+    assert not hasattr(RoutingConfig(), "respect_triage_action")
+
+    with pytest.raises(TypeError):
+        RoutingConfig(respect_triage_action=False)
 
 
 def test_routing_config_rejects_invalid_thresholds():

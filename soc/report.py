@@ -14,12 +14,13 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import fields, is_dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from soc.models import (
     Alert,
+    AnalysisSource,
     EnrichmentResult,
     EvidenceItem,
     IncidentCandidate,
@@ -28,7 +29,6 @@ from soc.models import (
     TriageResult,
     utc_now,
 )
-
 
 JsonDict = dict[str, Any]
 
@@ -400,9 +400,35 @@ def _triage_markdown(triage: TriageResult) -> str:
             f"- **False-positive likelihood:** `{fp_value}`",
             f"- **Classification:** `{triage.classification}`",
             f"- **Recommended action:** `{triage.action.value}`",
+            f"- **Analysis source:** {_analysis_source_description(triage)}",
             f"- **Summary:** {triage.summary}",
         ]
     )
+
+
+def _analysis_source_description(triage: TriageResult) -> str:
+    """Describe what actually produced a triage score.
+
+    A reader deciding whether to trust a score needs to know whether a model
+    produced it or whether local heuristics did, including when an LLM call
+    failed and fell back. Never let one present itself as the other.
+
+    Inputs:
+        triage: TriageResult object.
+
+    Outputs:
+        Human-readable provenance description.
+    """
+
+    if triage.analysis_source != AnalysisSource.LLM:
+        return "Deterministic local scoring (no model was consulted)"
+
+    parts = [f"LLM `{triage.model}`" if triage.model else "LLM (model not reported)"]
+    if triage.prompt_version:
+        parts.append(f"prompt `{triage.prompt_version}`")
+    if triage.latency_ms is not None:
+        parts.append(f"{triage.latency_ms} ms")
+    return ", ".join(parts)
 
 
 def _routing_markdown(routing: RoutingDecision) -> str:
@@ -749,7 +775,7 @@ def _build_report_id(candidate_id: str, triage_id: str) -> str:
         Report ID string.
     """
 
-    fingerprint = hashlib.sha256(f"{candidate_id}:{triage_id}".encode("utf-8")).hexdigest()[:12]
+    fingerprint = hashlib.sha256(f"{candidate_id}:{triage_id}".encode()).hexdigest()[:12]
     return f"report-{fingerprint}"
 
 
@@ -765,7 +791,7 @@ def _build_evidence_id(scope_id: str, item_id: str, kind: str) -> str:
         Evidence ID string.
     """
 
-    fingerprint = hashlib.sha256(f"{scope_id}:{kind}:{item_id}".encode("utf-8")).hexdigest()[:12]
+    fingerprint = hashlib.sha256(f"{scope_id}:{kind}:{item_id}".encode()).hexdigest()[:12]
     return f"evidence-{fingerprint}"
 
 
@@ -816,7 +842,7 @@ def _format_time(value: Any) -> str:
 
     if isinstance(value, datetime):
         if value.tzinfo is None:
-            value = value.replace(tzinfo=timezone.utc)
+            value = value.replace(tzinfo=UTC)
         return value.isoformat()
     if value is None:
         return "unknown"
