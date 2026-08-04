@@ -62,6 +62,21 @@ class TriageError(ValueError):
     """Raised when triage input or output is invalid."""
 
 
+NON_ESCALATING_RISK_FACTORS: frozenset[str] = frozenset(
+    {
+        "private_ip",
+        "loopback_ip",
+        "link_local_ip",
+    }
+)
+"""Risk factors that describe an address, not a threat.
+
+Local enrichment tags every internal address with `private_ip`. Treating that as
+a score boost inflates every internal-only alert — which is most alerts in a SOC
+— and manufactures review-queue noise. These stay in enrichment as useful
+context but must not raise a score on their own.
+"""
+
 MAX_CONTEXT_FIELD_CHARS = 512
 MAX_CONTEXT_ALERTS = 20
 TRUNCATION_MARKER = "...[truncated]"
@@ -1072,7 +1087,7 @@ def _enrichment_score_boost(enrichments: list[EnrichmentResult]) -> int:
             or "encodedcommand" in searchable
         ):
             boost += 2
-        elif severity_hint == "medium" or risk_factors:
+        elif severity_hint == "medium" or (risk_factors - NON_ESCALATING_RISK_FACTORS):
             boost += 1
     return min(boost, 3)
 

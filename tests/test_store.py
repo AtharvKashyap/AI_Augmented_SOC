@@ -20,6 +20,7 @@ from soc.models import (
     Alert,
     AlertSeverity,
     AnalysisSource,
+    AnalystVerdict,
     EventSource,
     EvidenceItem,
     FalsePositiveLikelihood,
@@ -506,3 +507,136 @@ def test_ingest_cursor_rejects_invalid_values():
 
     with pytest.raises(StoreError, match="byte_offset"):
         IngestCursor(source="wazuh_alerts_json", path="/a.json", byte_offset=-1)
+
+
+def _queued_triage(result_id: str = "triage-queue-001", score: int = 5) -> TriageResult:
+    """Build a triage result of the kind that lands in the review queue."""
+
+    return TriageResult(
+        id=result_id,
+        target_id="CAND-20260803-001",
+        target_type="incident_candidate",
+        score=score,
+        fp_likelihood=FalsePositiveLikelihood.MEDIUM,
+        classification="needs_analyst_review",
+        action=TriageAction.QUEUE_REVIEW,
+        summary="Needs a human decision.",
+    )
+
+
+def test_enqueue_for_review_creates_an_open_queue_item(store):
+    """Queued triage results must become reviewable work, not just a stored row."""
+
+    triage = _queued_triage()
+    store.save_triage_result(triage)
+
+    store.enqueue_for_review(triage)
+    open_items = store.list_open_queue_items()
+
+    assert len(open_items) == 1
+    assert open_items[0].triage_result_id == triage.id
+    assert open_items[0].target_id == "CAND-20260803-001"
+    assert open_items[0].score == 5
+    assert open_items[0].reviewed_at is None
+    assert open_items[0].analyst_verdict is None
+
+
+def test_enqueue_for_review_is_idempotent(store):
+    """Re-running the pipeline must not queue the same decision twice."""
+
+    triage = _queued_triage()
+    store.save_triage_result(triage)
+
+    store.enqueue_for_review(triage)
+    store.enqueue_for_review(triage)
+
+    assert len(store.list_open_queue_items()) == 1
+
+
+def test_record_analyst_verdict_closes_the_item(store):
+    """A recorded verdict must remove the item from the open queue."""
+
+    triage = _queued_triage()
+    store.save_triage_result(triage)
+    store.enqueue_for_review(triage)
+
+    store.record_analyst_verdict(
+        triage.id,
+        verdict=AnalystVerdict.TOO_HIGH,
+        analyst_score=2,
+        notes="Known backup job.",
+    )
+
+    assert store.list_open_queue_items() == []
+    reviewed = store.list_reviewed_queue_items()
+    assert len(reviewed) == 1
+    assert reviewed[0].analyst_verdict == AnalystVerdict.TOO_HIGH
+    assert reviewed[0].analyst_score == 2
+    assert reviewed[0].notes == "Known backup job."
+    assert reviewed[0].reviewed_at is not None
+
+
+def test_record_analyst_verdict_rejects_an_unknown_item(store):
+    """Recording a verdict for something never queued must fail loudly."""
+
+    with pytest.raises(StoreError, match="not in the review queue"):
+        store.record_analyst_verdict("triage-does-not-exist", verdict=AnalystVerdict.AGREE)
+
+
+def test_record_analyst_verdict_rejects_an_out_of_range_score(store):
+    """An analyst score must obey the same 1-10 scale as triage."""
+
+    triage = _queued_triage()
+    store.save_triage_result(triage)
+    store.enqueue_for_review(triage)
+
+    with pytest.raises(StoreError, match="between 1 and 10"):
+        store.record_analyst_verdict(triage.id, verdict=AnalystVerdict.TOO_LOW, analyst_score=42)
+
+
+def test_open_queue_items_are_oldest_first(store):
+    """Analysts should work the queue in arrival order."""
+
+    for index in range(3):
+        triage = _queued_triage(result_id=f"triage-{index}", score=4 + index)
+        store.save_triage_result(triage)
+        store.enqueue_for_review(triage)
+
+    assert [item.triage_result_id for item in store.list_open_queue_items()] == [
+        "triage-0",
+        "triage-1",
+        "triage-2",
+    ]
+
+
+def test_list_open_queue_items_honours_a_limit(store):
+    """A long queue must be pageable."""
+
+    for index in range(5):
+        triage = _queued_triage(result_id=f"triage-{index}")
+        store.save_triage_result(triage)
+        store.enqueue_for_review(triage)
+
+    assert len(store.list_open_queue_items(limit=2)) == 2
+
+
+def test_get_triage_result_returns_the_full_stored_payload(store):
+    """Reviewing an item needs the triage detail, not just its score."""
+
+    triage = _queued_triage()
+    triage.summary = "Encoded PowerShell reaching a public address."
+    triage.recommended_actions = ["Isolate endpoint-01"]
+    store.save_triage_result(triage)
+
+    stored = store.get_triage_result(triage.id)
+
+    assert stored is not None
+    assert stored["summary"] == "Encoded PowerShell reaching a public address."
+    assert stored["recommended_actions"] == ["Isolate endpoint-01"]
+    assert stored["score"] == 5
+
+
+def test_get_triage_result_returns_none_when_absent(store):
+    """A missing triage result is not an error."""
+
+    assert store.get_triage_result("nope") is None

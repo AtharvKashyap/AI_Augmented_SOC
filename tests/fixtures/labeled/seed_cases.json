@@ -1,0 +1,55 @@
+{
+  "_note": "SYNTHETIC SEED SET. These expected verdicts were written from security judgment while building the system, deliberately NOT by observing what the scorer currently outputs, which would make evaluation tautological. Measuring against them shows self-consistency, not accuracy. Only labels with provenance 'analyst_reviewed', exported from the analyst review queue, support an accuracy claim. This set is far smaller than the 40+ cases Milestone 2.5 calls for; it exists to make the harness real and to be grown from analyst review.",
+  "cases": [
+    {
+      "id": "benign-ssh-publickey-success",
+      "provenance": "synthetic",
+      "fixture": "tests/fixtures/sample_wazuh_benign_alert.json",
+      "expected_score_min": 1,
+      "expected_score_max": 3,
+      "expected_actions": ["mark_likely_benign"],
+      "expected_classification": "likely_false_positive_or_low_priority",
+      "rationale": "Routine sshd publickey authentication success at rule level 3, internal source to internal host, no process or command line. Should never reach an analyst."
+    },
+    {
+      "id": "suspicious-dga-dns-lookup",
+      "provenance": "synthetic",
+      "fixture": "tests/fixtures/sample_dns_suspicious_alert.json",
+      "expected_score_min": 4,
+      "expected_score_max": 6,
+      "expected_actions": ["queue_review"],
+      "expected_classification": null,
+      "rationale": "A single NXDOMAIN lookup of an algorithmically-generated domain warrants a look but not a page: it is a common beaconing precursor and an equally common artifact of benign software."
+    },
+    {
+      "id": "encoded-powershell-execution",
+      "provenance": "synthetic",
+      "fixture": "tests/fixtures/sample_wazuh_alert.json",
+      "expected_score_min": 6,
+      "expected_score_max": 10,
+      "expected_actions": ["queue_review", "page_now"],
+      "expected_classification": null,
+      "rationale": "Rule level 12 encoded PowerShell execution mapped to T1059.001 is a credible execution-stage detection, but encoded commands are also routine admin tooling, so both urgent review and paging are defensible. Deliberately labeled with a wide band rather than pretending one answer is correct."
+    },
+    {
+      "id": "suricata-trojan-download-cradle",
+      "provenance": "synthetic",
+      "fixture": "tests/fixtures/sample_so_alert.json",
+      "expected_score_min": 7,
+      "expected_score_max": 10,
+      "expected_actions": ["page_now", "queue_review"],
+      "expected_classification": null,
+      "rationale": "Suricata severity 1 Trojan-category signature for a PowerShell download cradle, outbound from an internal host to an external address fetching a .ps1. Signature plus direction plus payload type together make this a strong signal."
+    },
+    {
+      "id": "correlated-endpoint-and-network-incident",
+      "provenance": "synthetic",
+      "fixture": "tests/fixtures/sample_incident_replay.json",
+      "expected_score_min": 8,
+      "expected_score_max": 10,
+      "expected_actions": ["page_now"],
+      "expected_classification": null,
+      "rationale": "Endpoint execution correlated with outbound network activity on the same host within one window is the clearest paging case in the set: two independent sensors agreeing is much harder to dismiss than either alone."
+    }
+  ]
+}

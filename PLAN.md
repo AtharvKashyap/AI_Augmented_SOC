@@ -188,19 +188,38 @@ Verified end to end against a growing `alerts.json`: cycle 1 read 2 alerts and p
 - [x] Implement `MARK_LIKELY_BENIGN` path: log, mark likely benign, and keep searchable
 
 #### Milestone 2.4a — Make the review queue real *(new)*
-The human-in-the-loop is currently asserted but absent, and analyst disagreement is the only source of ground truth this project will ever get for free. Building this early feeds 2.5 continuously instead of requiring a one-off labeling session.
-- [ ] Add an `analyst_queue` table: `triage_result_id`, `candidate_id`, `queued_at`, `reviewed_at`, `analyst_verdict` (agree / too_high / too_low / wrong_class), `analyst_score`, `notes`
-- [ ] Minimal CLI to list open items, show the candidate and its evidence, and record a verdict — a short read-and-write loop, not the Phase 6 assistant
-- [ ] Export recorded verdicts into the labeled set used by 2.5
+The human-in-the-loop was asserted but absent, and analyst disagreement is the only source of ground truth this project will ever get for free. Building this early feeds 2.5 continuously instead of requiring a one-off labeling session.
+- [x] Add an `analyst_queue` table — keyed on `triage_result_id`, which is itself a deterministic content fingerprint, so re-running the pipeline cannot double-queue the same decision. Columns: `target_id`, `target_type`, `score`, `action`, `analysis_source`, `queued_at`, `reviewed_at`, `analyst_verdict`, `analyst_score`, `notes`.
+- [x] New `AnalystVerdict` enum (`agree` / `too_high` / `too_low` / `wrong_class`) and `ReviewQueueItem` model. The verdict records *how* a score was wrong, not only whether, because over-scoring and misclassification call for different fixes.
+- [x] The pipeline enqueues only `queue_review` results. Paged results are already in front of an analyst; likely-benign results stay searchable without demanding attention. An enqueue failure is recorded without discarding the run.
+- [x] Minimal CLI (`run_review.py`) to list open items, show a queued decision with its evidence, and record a verdict
+- [x] Export recorded verdicts with analyst provenance, so they can never be confused with synthetic labels
+- [~] Feed those verdicts into the 2.5 labeled set — **the export is not yet directly loadable as a labeled set.** A verdict records *how a score was wrong*; a labeled case needs a replayable fixture and an expected score band. A conversion step is required and is tracked as Milestone 2.5a. Until it exists, the feedback loop that justified building 2.4a before 2.5 is not closed.
 
 #### Milestone 2.5 — Evaluation harness and labeled set *(new)*
-The gap that matters most. Nothing today distinguishes good triage from bad, so no prompt or model change is currently measurable.
-- [ ] Create `tests/fixtures/labeled/` with 40+ alerts and candidates: real where possible, replay fixtures otherwise, seeded from 1.5's scenarios
-- [ ] Each entry carries an expected score band, expected action, expected classification, and a one-line rationale
-- [ ] Implement an eval runner that scores the whole set through local triage and through LLM triage and reports: action agreement rate, mean absolute score error, and a confusion matrix over the three actions
-- [ ] Report the two failure modes separately, because they are not symmetric: **missed true positives** (labeled malicious, scored ≤3) and **noise** (labeled benign, scored ≥8)
-- [ ] Run the local-triage half in CI on every push; the LLM half stays manual/opt-in so CI needs no API key
-- [ ] Record prompt version, model, and date on every eval run so results are comparable over time
+The gap that mattered most: nothing distinguished good triage from bad, so no prompt or model change was measurable. `soc/evaluation.py` plus the `run_eval.py` CLI.
+- [~] Create `tests/fixtures/labeled/` with 40+ alerts and candidates — **the harness is complete; the set holds 5 seed cases, not 40.** Growing it is a labeling task, not a coding task, and analyst-reviewed entries exported from 2.4a are the intended source. The seed exists to make the harness real and CI-enforceable.
+- [x] Each entry carries an expected score band, acceptable actions, optional classification, and a required one-line rationale. A label without a stated reason is rejected at load time: a label nobody can review is a label nobody should trust. Bands accept **multiple** acceptable actions, because genuinely ambiguous alerts should not be labeled as though one answer were correct.
+- [x] Eval runner scoring the whole set through local or LLM triage, reporting action agreement, in-band rate, score error, and an action confusion matrix. Score error is the distance *outside* the expected band, not from a midpoint: an in-band score is not an error.
+- [x] Report the two failure modes separately — `missed_true_positives` (labeled serious, scored ≤3) and `noise_cases` (labeled benign, scored ≥8). Deliberately never averaged: `mark_likely_benign` means nobody looks again, so a missed detection is not interchangeable with a wasted page.
+- [x] Local half runs in CI on every push via `run_eval.py --fail-under-thresholds`; the LLM half is opt-in through `--llm` so CI needs no API key. In LLM mode fallback is **disabled**, so a failed model call is a visible error rather than a local score quietly standing in for one and skewing the measurement.
+- [x] Exit criteria are executable: `EvaluationThresholds` encodes them and `check()` returns one message per unmet criterion, so a build can be gated on triage quality.
+- [x] Label provenance is tracked and surfaced. `is_analyst_validated` is false for any run containing a synthetic label, and the CLI prints the caveat to stderr on every such run, so a self-consistency run can never be quietly reported as an accuracy result.
+- [ ] Record prompt version and model on every eval run so results are comparable over time — the triage result carries both; the eval summary does not yet copy them through
+
+**First run found two real defects** in local scoring, which is the harness earning its place:
+
+1. **`private_ip` was treated as a score-raising risk factor.** Local enrichment tags every internal address with it, so each internal IP added +1 — inflating every internal-only alert, which is most alerts in a SOC. A routine internal SSH login scored 4 and landed in the review queue. Fixed via `NON_ESCALATING_RISK_FACTORS`: the tag remains as context but no longer raises a score.
+2. **Log filenames were extracted as domain IOCs.** `auth.log` parses as a domain because `.log` looks like a TLD, so a filename became an indicator, polluting reports and inviting the model to reason about a file as infrastructure. Fixed with `NON_DOMAIN_SUFFIXES`, deliberately excluding extensions that are also real TLDs (`.sh`, `.zip`, `.mov`).
+
+#### Milestone 2.5a — Convert analyst verdicts into labeled cases *(new)*
+The missing link between the review queue and the evaluation set. Without it, analyst judgment cannot reach the harness and the labeled set stays synthetic forever.
+- [ ] Reconstruct a replayable fixture from a reviewed target, from the raw events already persisted for it, so a labeled case is self-contained and committable rather than dependent on a live database whose rows age out
+- [ ] Derive an expected score band and acceptable actions from the verdict: `agree` narrows around the score triage gave, `too_high` and `too_low` shift the band in the stated direction, and an explicit `analyst_score` takes precedence over any inference
+- [ ] Carry the analyst's notes through as the required rationale, and mark provenance `analyst_reviewed`
+- [ ] Add a CLI path so promoting reviewed items into the labeled set is one command
+
+**Open finding, deliberately not "fixed":** the Suricata trojan-download-cradle case scores 6 against a labeled band of 7–10 — the local heuristic under-weights a network IDS malware signature. Its action still falls in the acceptable set. Tuning the scorer to hit a number we invented ourselves would be circular, so this is recorded as a finding for a real labeled set to confirm or refute.
 
 #### Milestone 2.6 — Analysis provenance *(new)* — **complete**
 - [x] Add `analysis_source` to `TriageResult`: `local` or `llm` — new `AnalysisSource` enum in `soc/models.py`

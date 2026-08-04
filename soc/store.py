@@ -35,9 +35,13 @@ from typing import Any
 
 from soc.models import (
     Alert,
+    AnalysisSource,
+    AnalystVerdict,
     IncidentCandidate,
     RawEvent,
+    ReviewQueueItem,
     RoutingDecision,
+    TriageAction,
     TriageResult,
     WazuhAgent,
     utc_now,
@@ -533,6 +537,178 @@ class SQLiteStore:
                 ),
             )
 
+    def get_triage_result(self, triage_result_id: str) -> JsonDict | None:
+        """Fetch one stored triage result as its full serialized payload.
+
+        Reviewing a queued decision needs the summary, IOCs, evidence and
+        recommended actions, not just the score, so this returns the stored
+        payload rather than the indexed columns.
+
+        Inputs:
+            triage_result_id: Triage result ID.
+
+        Outputs:
+            Triage result dictionary, or None when not stored.
+        """
+
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT payload_json FROM triage_results WHERE id = ?",
+                (triage_result_id,),
+            ).fetchone()
+
+        if row is None:
+            return None
+        payload = json.loads(row["payload_json"])
+        return payload if isinstance(payload, dict) else None
+
+    def enqueue_for_review(self, result: TriageResult) -> None:
+        """Add a triage result to the analyst review queue.
+
+        Keyed on the triage result ID, which is itself a deterministic content
+        fingerprint, so re-running the pipeline over the same input updates the
+        existing row instead of queueing duplicate work. An already-reviewed item
+        keeps its verdict.
+
+        Inputs:
+            result: TriageResult routed for analyst review.
+
+        Outputs:
+            None. The item is queued if it was not already present.
+        """
+
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO analyst_queue (
+                    triage_result_id, target_id, target_type, score, action,
+                    analysis_source, queued_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(triage_result_id) DO NOTHING
+                """,
+                (
+                    result.id,
+                    result.target_id,
+                    result.target_type,
+                    result.score,
+                    result.action.value,
+                    result.analysis_source.value,
+                    _dt_to_text(utc_now()),
+                ),
+            )
+
+    def list_open_queue_items(self, limit: int | None = None) -> list[ReviewQueueItem]:
+        """Return queue items still awaiting an analyst verdict, oldest first.
+
+        Inputs:
+            limit: Optional maximum number of items to return.
+
+        Outputs:
+            List of open ReviewQueueItem objects.
+        """
+
+        sql = """
+            SELECT * FROM analyst_queue
+            WHERE reviewed_at IS NULL
+            ORDER BY queued_at ASC, triage_result_id ASC
+        """
+        params: tuple[Any, ...] = ()
+        if limit is not None:
+            sql += " LIMIT ?"
+            params = (limit,)
+
+        with self._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [_queue_item_from_row(row) for row in rows]
+
+    def list_reviewed_queue_items(self, limit: int | None = None) -> list[ReviewQueueItem]:
+        """Return queue items an analyst has judged, most recent first.
+
+        These verdicts are the ground truth an evaluation set is built from.
+
+        Inputs:
+            limit: Optional maximum number of items to return.
+
+        Outputs:
+            List of reviewed ReviewQueueItem objects.
+        """
+
+        sql = """
+            SELECT * FROM analyst_queue
+            WHERE reviewed_at IS NOT NULL
+            ORDER BY reviewed_at DESC, triage_result_id ASC
+        """
+        params: tuple[Any, ...] = ()
+        if limit is not None:
+            sql += " LIMIT ?"
+            params = (limit,)
+
+        with self._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [_queue_item_from_row(row) for row in rows]
+
+    def get_queue_item(self, triage_result_id: str) -> ReviewQueueItem | None:
+        """Return one queue item by triage result ID.
+
+        Inputs:
+            triage_result_id: Triage result identifying the queue item.
+
+        Outputs:
+            ReviewQueueItem, or None when not queued.
+        """
+
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM analyst_queue WHERE triage_result_id = ?",
+                (triage_result_id,),
+            ).fetchone()
+        return None if row is None else _queue_item_from_row(row)
+
+    def record_analyst_verdict(
+        self,
+        triage_result_id: str,
+        *,
+        verdict: AnalystVerdict,
+        analyst_score: int | None = None,
+        notes: str | None = None,
+    ) -> None:
+        """Record an analyst's judgment and close the queue item.
+
+        Inputs:
+            triage_result_id: Queue item to close.
+            verdict: The analyst's judgment.
+            analyst_score: Optional score the analyst would have given, 1-10.
+            notes: Optional free-text notes.
+
+        Outputs:
+            None. The item is marked reviewed.
+
+        Raises:
+            StoreError: If the item is not queued or the score is out of range.
+        """
+
+        if analyst_score is not None and not 1 <= analyst_score <= 10:
+            raise StoreError("analyst_score must be between 1 and 10")
+
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE analyst_queue
+                SET reviewed_at = ?, analyst_verdict = ?, analyst_score = ?, notes = ?
+                WHERE triage_result_id = ?
+                """,
+                (
+                    _dt_to_text(utc_now()),
+                    verdict.value,
+                    analyst_score,
+                    notes,
+                    triage_result_id,
+                ),
+            )
+            if cursor.rowcount == 0:
+                raise StoreError(f"{triage_result_id} is not in the review queue")
+
     def has_dedup_key(self, key: str) -> bool:
         """Check whether a deduplication key already exists and is unexpired.
 
@@ -881,6 +1057,24 @@ CREATE TABLE IF NOT EXISTS dedup_keys (
 CREATE INDEX IF NOT EXISTS idx_dedup_keys_expires_at
     ON dedup_keys(expires_at);
 
+CREATE TABLE IF NOT EXISTS analyst_queue (
+    triage_result_id TEXT PRIMARY KEY,
+    target_id TEXT NOT NULL,
+    target_type TEXT NOT NULL,
+    score INTEGER NOT NULL,
+    action TEXT NOT NULL,
+    analysis_source TEXT,
+    queued_at TEXT NOT NULL,
+    reviewed_at TEXT,
+    analyst_verdict TEXT,
+    analyst_score INTEGER,
+    notes TEXT,
+    FOREIGN KEY(triage_result_id) REFERENCES triage_results(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_analyst_queue_open
+    ON analyst_queue(reviewed_at, queued_at);
+
 CREATE TABLE IF NOT EXISTS ingest_cursors (
     source TEXT NOT NULL,
     path TEXT NOT NULL,
@@ -892,6 +1086,33 @@ CREATE TABLE IF NOT EXISTS ingest_cursors (
     PRIMARY KEY (source, path)
 );
 """
+
+
+def _queue_item_from_row(row: Any) -> ReviewQueueItem:
+    """Build a ReviewQueueItem from a database row.
+
+    Inputs:
+        row: SQLite row from the analyst_queue table.
+
+    Outputs:
+        ReviewQueueItem instance.
+    """
+
+    verdict = row["analyst_verdict"]
+    source = row["analysis_source"]
+    return ReviewQueueItem(
+        triage_result_id=row["triage_result_id"],
+        target_id=row["target_id"],
+        target_type=row["target_type"],
+        score=int(row["score"]),
+        action=TriageAction(row["action"]),
+        analysis_source=AnalysisSource(source) if source else AnalysisSource.LOCAL,
+        queued_at=_text_to_dt(row["queued_at"]) or utc_now(),
+        reviewed_at=_text_to_dt(row["reviewed_at"]),
+        analyst_verdict=AnalystVerdict(verdict) if verdict else None,
+        analyst_score=None if row["analyst_score"] is None else int(row["analyst_score"]),
+        notes=row["notes"],
+    )
 
 
 def _to_json(value: Any) -> str:

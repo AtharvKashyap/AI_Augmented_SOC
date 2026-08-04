@@ -43,7 +43,20 @@ python3 run_pipeline.py --wazuh --daemon --poll-interval 60           # runs unt
 python3 run_pipeline.py --wazuh --daemon --max-cycles 3 --no-llm      # bounded, for testing
 ```
 
-CI runs ruff + pytest + the replay smoke test on Linux/macOS/Windows × Python 3.11/3.12. It never touches live Wazuh, Security Onion, OpenRouter, SMTP, or Slack.
+Analyst review queue and triage evaluation:
+
+```bash
+python3 run_review.py list                      # open queue, oldest first
+python3 run_review.py show <triage_result_id>   # the decision plus its evidence
+python3 run_review.py verdict <id> --too-high --score 2 --notes "known backup job"
+python3 run_review.py export --output labels.json   # analyst-derived labels for eval
+
+python3 run_eval.py --pretty                    # local triage vs the labeled set
+python3 run_eval.py --llm                       # model-assisted triage (needs a key)
+python3 run_eval.py --fail-under-thresholds     # gate a build on triage quality
+```
+
+CI runs ruff + pytest + **the local half of the triage evaluation** + the replay smoke test on Linux/macOS/Windows × Python 3.11/3.12. It never touches live Wazuh, Security Onion, OpenRouter, SMTP, or Slack.
 
 ## Architecture
 
@@ -73,6 +86,22 @@ Things that only become clear after reading several files:
 - **Daemon mode changes ingestion semantics, not the pipeline.** `soc/daemon.py` is deliberately ignorant of Wazuh and the pipeline: it takes a `run_cycle` callable, so any source can drive it and it stays trivially testable. `--daemon` passes the pipeline's store to `WazuhClient.from_settings(cursor_store=...)`, which makes the reader resume from a persisted byte offset instead of rescanning the file; a one-shot run passes `None` and keeps the old whole-file behaviour. The pipeline, Wazuh client, and cursor are built **once** and reused across cycles — rebuilding per cycle would reset the cursor. A failing cycle is logged to `logs/daemon.jsonl` and the loop continues.
 - **The CLI initializes the database before the first cycle.** The pipeline also initializes its store when it processes events, but the read cursor is consulted *before* that, so the schema must already exist. This bug passed 324 unit tests because every one of them used a fake store; only an end-to-end test with real components caught it. Prefer at least one real-component test per integration seam.
 - **`SQLiteStore.initialize()` migrates before it creates.** `CREATE TABLE IF NOT EXISTS` leaves older databases on their original schema, so `_apply_column_migrations` runs first and `ALTER TABLE`s any column listed in `_ADDED_COLUMNS` that is missing. Order matters: indexes in `_SCHEMA_SQL` may reference columns that only exist after migration. When you add a column to an existing table, add it to both places.
+
+### Triage quality is measured, not assumed
+
+`soc/evaluation.py` is the only thing in this project that asks whether the answers are *right* rather than merely produced. Read it before touching scoring, prompts, or the router.
+
+- **Label provenance is load-bearing.** `synthetic` labels record what we decided the scorer should say, so measuring against them shows self-consistency, not accuracy. Only `analyst_reviewed` labels — exported from the review queue via `run_review.py export` — support an accuracy claim. `EvaluationReport.is_analyst_validated` is false if *any* label in the run is synthetic, and the CLI prints that caveat to stderr. Do not remove either safeguard.
+- **The two failure modes are never averaged.** `missed_true_positives` (labeled serious, scored ≤3) and `noise_cases` (labeled benign, scored ≥8) are reported separately, because `mark_likely_benign` means nobody looks again — a missed detection is not interchangeable with a wasted page.
+- **Score error is distance outside the expected band**, not from a midpoint. An in-band score is not an error.
+- **Labels accept multiple acceptable actions.** Genuinely ambiguous alerts must not be labeled as though one answer were correct.
+- **Never write a label by running the scorer and recording what it said.** That makes the evaluation tautological. Labels come from security judgment or from analyst review; if the scorer disagrees, that is a finding to investigate, not a label to adjust.
+- `EvaluationThresholds` encodes Phase 2's exit criteria as executable checks, and CI gates on them.
+- The shipped set has 5 seed cases, far short of the 40+ the plan calls for. Growing it is a labeling task; the review queue is the intended source.
+
+### The analyst review queue
+
+`queue_review` is the only routing action that creates queue work — paged results are already in front of someone, and likely-benign results stay searchable without demanding attention. The queue is keyed on `triage_result_id`, which is a deterministic content fingerprint, so re-running the pipeline over the same input cannot double-queue. `AnalystVerdict` records *how* a score was wrong (`too_high` / `too_low` / `wrong_class`), not just that it was, because those call for different fixes. `enqueue_for_review` is an optional part of the store protocol: the pipeline skips queueing rather than failing if a store predates it.
 
 ### Configuration
 

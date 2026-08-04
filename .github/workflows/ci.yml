@@ -7,12 +7,19 @@
 #   - Dependencies install successfully
 #   - Ruff linting passes
 #   - Unit tests pass with pytest
+#   - Triage quality still meets the labeled-set thresholds
 #   - The replay-driven pipeline CLI runs successfully
 #   - A report artifact can be generated from sample replay data
 #
 # Notes:
 #   This workflow avoids live Wazuh, Security Onion, OpenRouter, SMTP, and Slack
 #   dependencies. It only validates the local replay-driven MVP path.
+#
+#   The evaluation step runs the LOCAL half of the triage evaluation only, so it
+#   needs no API key. The LLM half is opt-in via `run_eval.py --llm` and is not
+#   run here. Note that the shipped labels are synthetic, so a passing step means
+#   local triage is self-consistent with our stated expectations, not that triage
+#   accuracy has been validated against analyst judgment.
 
 name: CI
 
@@ -57,11 +64,15 @@ jobs:
 
       - name: Run Ruff linting
         run: |
-          ruff check soc tests run_pipeline.py
+          ruff check soc tests run_pipeline.py run_review.py run_eval.py
 
       - name: Run unit tests
         run: |
           pytest tests/ -v
+
+      - name: Evaluate triage against the labeled set
+        shell: bash
+        run: python run_eval.py --fail-under-thresholds --pretty
 
       - name: Run replay CLI smoke test
         shell: bash

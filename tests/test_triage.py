@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from soc.enrichment import enrich_indicator
+from soc.enrichment import LocalEnricher, enrich_indicator
 from soc.models import (
     Alert,
     AlertSeverity,
@@ -791,3 +791,47 @@ def test_triage_engine_rejects_negative_json_retries():
 
     with pytest.raises(TriageError, match="max_json_retries"):
         TriageEngine(max_json_retries=-1)
+
+
+def test_private_ip_enrichment_does_not_inflate_the_score():
+    """Being on an internal network is not a risk signal.
+
+    Local enrichment marks every private address with a `private_ip` risk
+    factor. Counting that as a score boost inflates every internal-only alert,
+    which is most alerts in a SOC, and manufactures review-queue noise.
+    """
+
+    alert = Alert(
+        id="alert-internal-001",
+        source=EventSource.WAZUH,
+        timestamp=BASE_TIME,
+        severity=AlertSeverity.LOW,
+        rule_name="sshd: authentication success.",
+        src_ip="10.0.1.55",
+        dst_ip="10.0.1.10",
+        hostname="linux-app-01",
+        user="deploy",
+    )
+    enrichments = LocalEnricher().enrich_alert(alert)
+
+    assert enrichments, "expected local enrichment to produce indicators"
+    assert score_alert_locally(alert, enrichments) == score_alert_locally(alert, [])
+
+
+def test_high_risk_enrichment_still_boosts_the_score():
+    """Suppressing private-IP noise must not suppress genuine risk factors."""
+
+    alert = _alert()
+
+    boosted = score_alert_locally(alert, [_high_risk_enrichment()])
+
+    assert boosted > score_alert_locally(
+        _alert(
+            severity=AlertSeverity.MEDIUM,
+            rule_name="Generic script alert",
+            command_line=None,
+            process_name=None,
+            dst_ip="10.0.1.20",
+        ),
+        [],
+    )

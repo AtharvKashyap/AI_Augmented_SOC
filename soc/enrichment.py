@@ -37,6 +37,42 @@ class EnrichmentError(ValueError):
 
 IOC_TYPE_IP = "ip"
 IOC_TYPE_DOMAIN = "domain"
+
+NON_DOMAIN_SUFFIXES: tuple[str, ...] = (
+    ".local",
+    # Filenames whose extension parses as a plausible TLD. Log lines are full of
+    # these, and a filename promoted to a "domain" IOC pollutes reports and
+    # invites the LLM to reason about a file as though it were infrastructure.
+    ".bak",
+    ".bat",
+    ".cfg",
+    ".cmd",
+    ".conf",
+    ".dll",
+    ".evtx",
+    ".exe",
+    ".ini",
+    ".jar",
+    ".js",
+    ".json",
+    ".log",
+    ".msi",
+    ".pcap",
+    ".ps1",
+    ".py",
+    ".sqlite",
+    ".sys",
+    ".tmp",
+    ".txt",
+    ".xml",
+    ".yaml",
+    ".yml",
+)
+"""Suffixes that look like domains but are filenames or non-routable names.
+
+Deliberately excludes extensions that are also real TLDs, such as .sh, .zip and
+.mov, since suppressing those would hide genuine domains.
+"""
 IOC_TYPE_URL = "url"
 IOC_TYPE_EMAIL = "email"
 IOC_TYPE_HASH = "hash"
@@ -647,9 +683,10 @@ def _is_common_false_domain(value: str) -> bool:
     """
 
     lowered = value.lower()
-    false_suffixes = (".exe", ".dll", ".local")
     false_values = {"powershell.exe", "cmd.exe", "rundll32.exe", "regsvr32.exe"}
-    return lowered in false_values or lowered.endswith(false_suffixes)
+    if lowered in false_values:
+        return True
+    return lowered.endswith(NON_DOMAIN_SUFFIXES)
 
 
 def _clean_text(value: Any) -> str:

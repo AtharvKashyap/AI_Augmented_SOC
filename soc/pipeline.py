@@ -25,6 +25,7 @@ from soc.models import (
     IncidentCandidate,
     RawEvent,
     RoutingDecision,
+    TriageAction,
     TriageResult,
     utc_now,
 )
@@ -64,6 +65,13 @@ class StoreProtocol(Protocol):
 
     def save_routing_decision(self, decision: RoutingDecision) -> None:
         """Persist a routing decision."""
+
+    def enqueue_for_review(self, result: TriageResult) -> None:
+        """Add a triage result to the analyst review queue.
+
+        Optional: stores predating the review queue may omit this, and the
+        pipeline skips queueing rather than failing when it is absent.
+        """
 
 
 @dataclass(frozen=True, slots=True)
@@ -457,6 +465,7 @@ class SOCPipeline:
             return None
 
         self._save_routing_decision(routing, errors)
+        self._enqueue_for_review(triage, routing, errors)
         report_text = self.reporter.build_candidate_report(
             candidate,
             triage,
@@ -678,6 +687,39 @@ class SOCPipeline:
             self.store.save_routing_decision(routing)
         except Exception as exc:
             self._handle_error(errors, f"save routing failed for {routing.id}: {exc}")
+
+    def _enqueue_for_review(
+        self,
+        triage: TriageResult,
+        routing: RoutingDecision,
+        errors: list[str],
+    ) -> None:
+        """Add review-bound results to the analyst queue.
+
+        Only `queue_review` results are queued. Paged results are already in
+        front of an analyst, and likely-benign results stay searchable without
+        demanding attention.
+
+        Inputs:
+            triage: TriageResult under review.
+            routing: RoutingDecision produced for it.
+            errors: Mutable error list.
+
+        Outputs:
+            None.
+        """
+
+        if self.store is None or routing.action != TriageAction.QUEUE_REVIEW:
+            return
+
+        enqueue = getattr(self.store, "enqueue_for_review", None)
+        if enqueue is None:
+            return
+
+        try:
+            enqueue(triage)
+        except Exception as exc:
+            self._handle_error(errors, f"review queue enqueue failed for {triage.id}: {exc}")
 
     def _handle_error(self, errors: list[str], message: str) -> None:
         """Collect or raise pipeline error.
