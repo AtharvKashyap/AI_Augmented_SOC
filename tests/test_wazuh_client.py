@@ -1124,13 +1124,53 @@ def test_alert_json_reader_detects_same_size_rewrite(tmp_path):
     first = _alert(alert_id="alert-001")
     _write_alerts(alert_path, [first])
     assert reader.read_recent_alerts() == [first]
+    size_before = alert_path.stat().st_size
 
-    # Truncate in place and refill: same inode, byte-identical length.
+    # Truncate in place and refill. Compare the sizes directly rather than
+    # computing an expected byte count: line-ending translation makes any
+    # hardcoded arithmetic platform-specific, and the property under test is
+    # simply that the size did not change, so size cannot detect the rewrite.
     replacement = _alert(alert_id="alert-002")
     _write_alerts(alert_path, [replacement])
-    assert alert_path.stat().st_size == len(json.dumps(first)) + 1
+    assert alert_path.stat().st_size == size_before
 
     assert reader.read_recent_alerts() == [replacement]
+
+
+def test_alert_json_reader_counts_crlf_line_endings_correctly(tmp_path):
+    """A file with Windows line endings must still yield exact byte offsets.
+
+    An alerts.json copied to or written on Windows has CRLF endings. If the
+    cursor counted bytes as though endings were one byte, every cycle would
+    re-read or skip data.
+
+    Inputs:
+        tmp_path: Pytest temporary directory fixture.
+
+    Outputs:
+        None. Assertions verify the offset matches the file size exactly and
+        that only newly appended alerts are returned.
+    """
+
+    alert_path = tmp_path / "alerts.json"
+    store = _cursor_store(tmp_path)
+    first = _alert(alert_id="alert-001")
+    with alert_path.open("w", encoding="utf-8", newline="\r\n") as handle:
+        handle.write(json.dumps(first) + "\n")
+
+    assert alert_path.read_bytes().endswith(b"\r\n")
+    reader = WazuhAlertJsonReader(_alert_json_config(alert_path), cursor_store=store)
+
+    assert reader.read_recent_alerts() == [first]
+    cursor = store.get_ingest_cursor(WAZUH_ALERT_CURSOR_SOURCE, str(alert_path))
+    assert cursor.byte_offset == alert_path.stat().st_size
+    assert reader.read_recent_alerts() == []
+
+    second = _alert(alert_id="alert-002")
+    with alert_path.open("a", encoding="utf-8", newline="\r\n") as handle:
+        handle.write(json.dumps(second) + "\n")
+
+    assert reader.read_recent_alerts() == [second]
 
 
 def test_alert_json_reader_keeps_cursor_when_file_only_grows(tmp_path):

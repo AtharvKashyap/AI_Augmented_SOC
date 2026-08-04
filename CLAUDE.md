@@ -149,6 +149,7 @@ Config tests write a throwaway `.env.test` under `tmp_path` and `monkeypatch.del
 - One test module per `soc` module (`tests/test_<module>.py`), fixtures in `tests/fixtures/`. Live-integration tests fake the transport rather than hitting the network.
 - `tests/conftest.py` snapshots and restores `os.environ` and the settings cache around every test. This is load-bearing: `get_settings` uses `load_dotenv`, which writes into `os.environ` permanently and does **not** override variables that are already set, so without isolation one test's `.env` silently wins over a later test's and the suite becomes order-dependent.
 - Assert on score *bands*, never exact triage scores, so tuning the heuristic does not produce false failures.
+- **Never hardcode byte arithmetic in a test.** Windows text-mode writes translate `\n` to `\r\n`, so `len(text) + 1` is a POSIX-only assumption that fails there. Compare against the actual `st_size`, or capture a size before and after and compare those. Two Windows-only CI failures came from this. The reader itself reads in binary and counts real bytes, so CRLF input is handled correctly and there is a test proving it.
 
 ## Not built yet
 
