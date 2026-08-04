@@ -90,8 +90,13 @@ class IngestCursor:
         source: Logical source name, for example wazuh_alerts_json.
         path: Absolute path of the file being read.
         byte_offset: Byte position just past the last fully consumed record.
-        inode: Filesystem inode of the file when the offset was recorded.
-        device: Filesystem device ID of the file when the offset was recorded.
+        file_identity: Opaque token identifying the file the offset belongs to,
+            combining device and inode. Stored as a non-numeric string on
+            purpose. Windows file IDs are 128-bit, which overflows SQLite's
+            64-bit INTEGER, and a numeric-looking string in a column with
+            INTEGER affinity is silently converted to a float, losing precision
+            and quietly breaking rotation detection. Only equality matters here,
+            never arithmetic.
         content_fingerprint: Digest of the file's leading bytes, formatted as
             "<length>:<sha256 hex>". Inode and size cannot detect a log that was
             truncated in place and refilled to a similar length, which is what
@@ -104,8 +109,7 @@ class IngestCursor:
     source: str
     path: str
     byte_offset: int
-    inode: int | None = None
-    device: int | None = None
+    file_identity: str | None = None
     content_fingerprint: str | None = None
     updated_at: datetime | None = None
 
@@ -838,7 +842,7 @@ class SQLiteStore:
         with self._connect() as conn:
             row = conn.execute(
                 """
-                SELECT source, path, byte_offset, inode, device,
+                SELECT source, path, byte_offset, file_identity,
                        content_fingerprint, updated_at
                 FROM ingest_cursors
                 WHERE source = ? AND path = ?
@@ -853,8 +857,7 @@ class SQLiteStore:
             source=row["source"],
             path=row["path"],
             byte_offset=int(row["byte_offset"]),
-            inode=None if row["inode"] is None else int(row["inode"]),
-            device=None if row["device"] is None else int(row["device"]),
+            file_identity=None if row["file_identity"] is None else str(row["file_identity"]),
             content_fingerprint=row["content_fingerprint"],
             updated_at=_text_to_dt(row["updated_at"]),
         )
@@ -873,14 +876,13 @@ class SQLiteStore:
             conn.execute(
                 """
                 INSERT INTO ingest_cursors (
-                    source, path, byte_offset, inode, device,
+                    source, path, byte_offset, file_identity,
                     content_fingerprint, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(source, path) DO UPDATE SET
                     byte_offset = excluded.byte_offset,
-                    inode = excluded.inode,
-                    device = excluded.device,
+                    file_identity = excluded.file_identity,
                     content_fingerprint = excluded.content_fingerprint,
                     updated_at = excluded.updated_at
                 """,
@@ -888,8 +890,7 @@ class SQLiteStore:
                     cursor.source,
                     cursor.path,
                     cursor.byte_offset,
-                    cursor.inode,
-                    cursor.device,
+                    cursor.file_identity,
                     cursor.content_fingerprint,
                     _dt_to_text(cursor.updated_at or utc_now()),
                 ),
@@ -949,6 +950,7 @@ class SQLiteStore:
 _ADDED_COLUMNS: dict[str, dict[str, str]] = {
     "ingest_cursors": {
         "content_fingerprint": "TEXT",
+        "file_identity": "TEXT",
     },
     "triage_results": {
         "latency_ms": "INTEGER",
@@ -1129,8 +1131,7 @@ CREATE TABLE IF NOT EXISTS ingest_cursors (
     source TEXT NOT NULL,
     path TEXT NOT NULL,
     byte_offset INTEGER NOT NULL,
-    inode INTEGER,
-    device INTEGER,
+    file_identity TEXT,
     content_fingerprint TEXT,
     updated_at TEXT NOT NULL,
     PRIMARY KEY (source, path)

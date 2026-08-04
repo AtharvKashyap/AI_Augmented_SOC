@@ -389,6 +389,8 @@ All fixed under TDD on branch `defect-fixes`; suite grew from 240 to 277 tests.
 | `prompts/*.txt` unread | Deleted; prompts live in Python so they can be versioned and unit tested |
 | Empty placeholder files | `run_report.py`, `run_triage.py`, `soc/security_onion_client.py` and its empty test deleted |
 | `pydantic` declared, unused | Removed from `requirements.txt` |
+| Read cursor unusable on Windows | `st_ino` there is a 128-bit file ID, which overflows SQLite's INTEGER, so every daemon cycle failed. Worse, a numeric string in an INTEGER-affinity column was silently coerced to a float and lost precision, which would have broken rotation detection rather than crashing. Replaced the two integer columns with one non-numeric `file_identity` TEXT token. Found only by the Windows CI jobs. |
+| CI lint non-reproducible | Ruff was installed unpinned with no config, so the rule set was whatever the newest release defaulted to. `ruff.toml` now states the rule set and `requirements.txt` pins the version. |
 | No read cursor; whole file re-read each run | `ingest_cursors` table plus rotation, truncation, and in-place-rewrite detection |
 | Two shipped fixtures could not be loaded by `--replay` at all | `load_replay_file` now accepts a bare event object; a parametrized test asserts every shipped fixture loads |
 | Read cursor consulted before the schema existed | The CLI initializes the store up front. Found by an end-to-end test with real components, not by any of the 324 unit tests — every one of them used a fake store. |

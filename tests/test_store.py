@@ -424,8 +424,7 @@ def test_upsert_and_get_ingest_cursor(store):
         source="wazuh_alerts_json",
         path="/var/ossec/logs/alerts/alerts.json",
         byte_offset=2048,
-        inode=1234567,
-        device=16777220,
+        file_identity="16777220-1234567",
     )
 
     store.upsert_ingest_cursor(cursor)
@@ -435,8 +434,7 @@ def test_upsert_and_get_ingest_cursor(store):
     assert loaded.source == "wazuh_alerts_json"
     assert loaded.path == "/var/ossec/logs/alerts/alerts.json"
     assert loaded.byte_offset == 2048
-    assert loaded.inode == 1234567
-    assert loaded.device == 16777220
+    assert loaded.file_identity == "16777220-1234567"
     assert loaded.updated_at is not None
 
 
@@ -451,18 +449,17 @@ def test_upsert_ingest_cursor_updates_existing_row(store):
     """
 
     store.upsert_ingest_cursor(
-        IngestCursor(source="wazuh_alerts_json", path="/alerts.json", byte_offset=10, inode=1, device=2)
+        IngestCursor(source="wazuh_alerts_json", path="/alerts.json", byte_offset=10, file_identity="2-1")
     )
     store.upsert_ingest_cursor(
-        IngestCursor(source="wazuh_alerts_json", path="/alerts.json", byte_offset=99, inode=3, device=4)
+        IngestCursor(source="wazuh_alerts_json", path="/alerts.json", byte_offset=99, file_identity="4-3")
     )
 
     loaded = store.get_ingest_cursor("wazuh_alerts_json", "/alerts.json")
 
     assert loaded is not None
     assert loaded.byte_offset == 99
-    assert loaded.inode == 3
-    assert loaded.device == 4
+    assert loaded.file_identity == "4-3"
 
     with store._connect() as conn:
         count = conn.execute("SELECT COUNT(*) AS n FROM ingest_cursors").fetchone()["n"]
@@ -707,3 +704,60 @@ def test_list_raw_events_for_an_unknown_target_is_empty(store):
     """An unknown target is not an error."""
 
     assert store.list_raw_events_for_target("nope", "incident_candidate") == []
+
+
+def test_ingest_cursor_persists_windows_scale_file_identifiers(store):
+    """Windows file IDs exceed SQLite's 64-bit INTEGER and must still persist.
+
+    os.stat().st_ino on Windows is a 128-bit file ID. Binding one as an INTEGER
+    raises OverflowError, which made the read cursor -- and therefore the whole
+    daemon -- unusable on Windows.
+
+    Inputs:
+        store: Initialized SQLiteStore fixture.
+
+    Outputs:
+        None. Assertions verify a large identifier round-trips unchanged.
+    """
+
+    huge_identity = f"{2**70}-{2**80 + 12345}"
+    cursor = IngestCursor(
+        source="wazuh_alerts_json",
+        path="C:\\logs\\alerts.json",
+        byte_offset=512,
+        file_identity=huge_identity,
+        content_fingerprint="16:abc123",
+    )
+
+    store.upsert_ingest_cursor(cursor)
+    loaded = store.get_ingest_cursor("wazuh_alerts_json", "C:\\logs\\alerts.json")
+
+    assert loaded is not None
+    assert loaded.file_identity == huge_identity
+    assert loaded.byte_offset == 512
+
+
+def test_ingest_cursor_without_a_stored_identity_still_loads(store):
+    """A cursor row predating file_identity must load rather than fail.
+
+    Inputs:
+        store: Initialized SQLiteStore fixture.
+
+    Outputs:
+        None. Assertion verifies a missing identity reads back as None.
+    """
+
+    with store._connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO ingest_cursors (source, path, byte_offset, updated_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            ("wazuh_alerts_json", "/var/log/alerts.json", 100, "2026-08-04T00:00:00+00:00"),
+        )
+
+    loaded = store.get_ingest_cursor("wazuh_alerts_json", "/var/log/alerts.json")
+
+    assert loaded is not None
+    assert loaded.file_identity is None
+    assert loaded.byte_offset == 100

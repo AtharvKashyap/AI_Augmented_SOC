@@ -438,10 +438,10 @@ class WazuhAlertJsonReader:
     def _start_offset(self, file_stat: os.stat_result) -> int:
         """Return the byte offset this read should start from.
 
-        A stored cursor is only trusted when it still describes the same file:
-        a changed inode or device means the path was rotated to a new file, and
-        a file smaller than the stored offset means it was truncated. Both cases
-        reset the offset to zero so no alert is silently skipped.
+        A stored cursor is only trusted when it still describes the same file.
+        A changed device/inode identity means the path was rotated to a new file,
+        and a file smaller than the stored offset means it was truncated. Both
+        cases reset the offset to zero so no alert is silently skipped.
 
         Inputs:
             file_stat: Stat result for the configured alerts.json path.
@@ -457,21 +457,14 @@ class WazuhAlertJsonReader:
         if cursor is None:
             return 0
 
-        if cursor.inode is not None and cursor.inode != file_stat.st_ino:
+        current_identity = _file_identity(file_stat)
+        if cursor.file_identity is not None and cursor.file_identity != current_identity:
             logger.warning(
-                "Wazuh alert file %s was rotated (inode %s -> %s); reading from the start",
+                "Wazuh alert file %s is a different file than the cursor describes "
+                "(%s -> %s); reading from the start",
                 self.config.path,
-                cursor.inode,
-                file_stat.st_ino,
-            )
-            return 0
-
-        if cursor.device is not None and cursor.device != file_stat.st_dev:
-            logger.warning(
-                "Wazuh alert file %s moved to another device (%s -> %s); reading from the start",
-                self.config.path,
-                cursor.device,
-                file_stat.st_dev,
+                cursor.file_identity,
+                current_identity,
             )
             return 0
 
@@ -551,8 +544,7 @@ class WazuhAlertJsonReader:
                 source=self.cursor_source,
                 path=str(self.config.path),
                 byte_offset=offset,
-                inode=file_stat.st_ino,
-                device=file_stat.st_dev,
+                file_identity=_file_identity(file_stat),
                 content_fingerprint=self._build_fingerprint(self.config.path),
                 updated_at=utc_now(),
             )
@@ -949,3 +941,23 @@ def _fingerprint_head(path: Path, length: int) -> str | None:
         return None
 
     return f"{len(head)}:{hashlib.sha256(head).hexdigest()}"
+
+
+def _file_identity(file_stat: os.stat_result) -> str:
+    """Build an opaque identity token for a file from its stat result.
+
+    Device and inode are combined into one hyphenated string rather than stored
+    as two integers. Windows file IDs are 128-bit and overflow SQLite's 64-bit
+    INTEGER, and a numeric-looking string in a column with INTEGER affinity gets
+    silently converted to a float, losing precision and quietly breaking
+    rotation detection. A hyphenated token is never numeric, so it survives
+    intact. Only equality is ever needed.
+
+    Inputs:
+        file_stat: Stat result for the file.
+
+    Outputs:
+        Identity string of the form "<device>-<inode>".
+    """
+
+    return f"{file_stat.st_dev}-{file_stat.st_ino}"

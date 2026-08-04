@@ -776,8 +776,7 @@ def test_alert_json_reader_persists_cursor_position(tmp_path):
 
     assert cursor is not None
     assert cursor.byte_offset == stat.st_size
-    assert cursor.inode == stat.st_ino
-    assert cursor.device == stat.st_dev
+    assert cursor.file_identity == f"{stat.st_dev}-{stat.st_ino}"
 
 
 def test_alert_json_reader_rereads_whole_file_after_rotation(tmp_path):
@@ -815,9 +814,14 @@ def test_alert_json_reader_rereads_whole_file_after_truncation(tmp_path):
 
     replacement = _alert(alert_id="alert-003")
     _write_alerts(alert_path, [replacement])
-    assert alert_path.stat().st_ino == store.get_ingest_cursor(
+
+    # Same file, so it is truncation and not rotation that must trigger the
+    # full re-read. Asserting the identity is unchanged keeps this test honest
+    # about which mechanism it is exercising.
+    stat = alert_path.stat()
+    assert store.get_ingest_cursor(
         WAZUH_ALERT_CURSOR_SOURCE, str(alert_path)
-    ).inode
+    ).file_identity == f"{stat.st_dev}-{stat.st_ino}"
 
     assert reader.read_recent_alerts() == [replacement]
 
@@ -1146,6 +1150,59 @@ def test_alert_json_reader_keeps_cursor_when_file_only_grows(tmp_path):
     first = _alert(alert_id="alert-001")
     _write_alerts(alert_path, [first])
     assert reader.read_recent_alerts() == [first]
+
+    second = _alert(alert_id="alert-002")
+    with alert_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(second) + "\n")
+
+    assert reader.read_recent_alerts() == [second]
+
+
+def test_alert_json_reader_handles_windows_scale_file_identifiers(tmp_path, monkeypatch):
+    """The reader must work where st_ino exceeds a 64-bit integer.
+
+    This reproduces the Windows failure on any platform: a 128-bit file ID cannot
+    be bound as a SQLite INTEGER, which broke every daemon cycle on Windows.
+
+    Inputs:
+        tmp_path: Pytest temporary directory fixture.
+        monkeypatch: Pytest monkeypatch fixture.
+
+    Outputs:
+        None. Assertions verify the cursor still advances across reads.
+    """
+
+    alert_path = tmp_path / "alerts.json"
+    store = _cursor_store(tmp_path)
+    first = _alert(alert_id="alert-001")
+    _write_alerts(alert_path, [first])
+
+    real_stat = Path.stat
+
+    class _HugeIdStat:
+        """Stat result reporting Windows-scale identity values."""
+
+        def __init__(self, wrapped: Any) -> None:
+            self._wrapped = wrapped
+            self.st_ino = 2**80 + 999
+            self.st_dev = 2**70 + 7
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self._wrapped, name)
+
+    def _fake_stat(self: Path, *args: Any, **kwargs: Any) -> Any:
+        """Return a stat result with oversized identity fields."""
+
+        result = real_stat(self, *args, **kwargs)
+        if self == alert_path:
+            return _HugeIdStat(result)
+        return result
+
+    monkeypatch.setattr(Path, "stat", _fake_stat)
+    reader = WazuhAlertJsonReader(_alert_json_config(alert_path), cursor_store=store)
+
+    assert reader.read_recent_alerts() == [first]
+    assert reader.read_recent_alerts() == []
 
     second = _alert(alert_id="alert-002")
     with alert_path.open("a", encoding="utf-8") as handle:
