@@ -52,7 +52,6 @@ from soc.models import (
 )
 from soc.openrouter_client import OpenRouterError, parse_json_response_text
 
-
 logger = logging.getLogger(__name__)
 
 JsonDict = dict[str, Any]
@@ -1074,7 +1073,7 @@ def _enrichment_score_boost(enrichments: list[EnrichmentResult]) -> int:
         details_text = json.dumps(_json_safe(details), sort_keys=True).lower()
         summary_text = str(getattr(enrichment, "summary", "")).lower()
         indicator_text = str(getattr(enrichment, "indicator", "")).lower()
-        searchable = " ".join([details_text, summary_text, indicator_text])
+        searchable = f"{details_text} {summary_text} {indicator_text}"
 
         severity_hint = str(details.get("severity_hint", "")).lower()
         risk_factors = {str(item).lower() for item in details.get("risk_factors", [])}

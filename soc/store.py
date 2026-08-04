@@ -29,7 +29,7 @@ import sqlite3
 from collections.abc import Iterable
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -46,7 +46,6 @@ from soc.models import (
     WazuhAgent,
     utc_now,
 )
-
 
 JsonDict = dict[str, Any]
 
@@ -1208,7 +1207,7 @@ def _dt_to_text(value: datetime | None) -> str | None:
     if value is None:
         return None
     if value.tzinfo is None:
-        value = value.replace(tzinfo=timezone.utc)
+        value = value.replace(tzinfo=UTC)
     return value.isoformat()
 
 
@@ -1230,8 +1229,8 @@ def _text_to_dt(value: str | None) -> datetime | None:
     except ValueError:
         return None
     if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 def _count_rows(conn: sqlite3.Connection, table: str) -> int:

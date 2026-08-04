@@ -14,11 +14,12 @@ order-dependent.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
+from run_review import build_parser, main, run_from_args
 from soc.models import (
     Alert,
     AlertSeverity,
@@ -32,8 +33,6 @@ from soc.models import (
     TriageResult,
 )
 from soc.store import SQLiteStore
-
-from run_review import build_parser, main, run_from_args
 
 
 def _env_file(tmp_path: Path, db_path: Path) -> Path:
@@ -76,7 +75,7 @@ def _advancing_clock(monkeypatch: pytest.MonkeyPatch) -> None:
         None. `soc.store.utc_now` is replaced for the test.
     """
 
-    base = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    base = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
     counter = {"n": 0}
 
     def _next() -> datetime:
@@ -128,7 +127,7 @@ def _seed_queue_item(
         The seeded TriageResult.
     """
 
-    timestamp = datetime(2026, 1, 1, 11, 0, 0, tzinfo=timezone.utc)
+    timestamp = datetime(2026, 1, 1, 11, 0, 0, tzinfo=UTC)
     alert_id = target_id if target_type == "alert" else f"ALERT-{triage_id}"
     alert = Alert(
         id=alert_id,

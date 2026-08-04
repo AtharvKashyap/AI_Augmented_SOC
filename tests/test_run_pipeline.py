@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 from dataclasses import dataclass, field
+from datetime import UTC
 from pathlib import Path
 from typing import Any
 
@@ -904,11 +905,11 @@ def _write_env_file(tmp_path: Path, alerts_path: Path) -> Path:
 def _write_live_alert(alerts_path: Path, alert_id: str, *, append: bool = False) -> None:
     """Append or write one realistic Wazuh alert line."""
 
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     record = {
         "id": alert_id,
-        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f%z"),
+        "timestamp": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%f%z"),
         "rule": {"level": 10, "description": "Suspicious authentication", "groups": ["sshd"]},
         "agent": {"id": "001", "name": "endpoint-01", "ip": "10.0.1.42"},
         "data": {"srcip": "203.0.113.10", "dstuser": "root"},

@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC
 from pathlib import Path
 
 import pytest
@@ -147,7 +148,7 @@ def test_promote_command_writes_a_loadable_labeled_set(tmp_path, capsys):
     reaching the evaluation harness and the labeled set stays synthetic.
     """
 
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     import run_review
     from soc.models import (
@@ -163,7 +164,7 @@ def test_promote_command_writes_a_loadable_labeled_set(tmp_path, capsys):
     )
     from soc.store import SQLiteStore
 
-    moment = datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc)
+    moment = datetime(2026, 8, 3, 12, 0, tzinfo=UTC)
     db_path = tmp_path / "soc.db"
     store = SQLiteStore(db_path)
     store.initialize()

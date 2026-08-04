@@ -10,8 +10,8 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from pathlib import Path
 from collections.abc import Callable, Sequence
+from pathlib import Path
 from typing import Any
 
 from soc.config import ConfigError, get_settings
@@ -23,7 +23,6 @@ from soc.pipeline import PipelineConfig, PipelineError, SOCPipeline
 from soc.security_onion_client import SecurityOnionClient, SecurityOnionError
 from soc.triage import TriageEngine
 from soc.wazuh_client import WazuhClient, WazuhError
-
 
 JsonDict = dict[str, Any]
 

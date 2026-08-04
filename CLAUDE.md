@@ -12,7 +12,7 @@ pytest tests/ -v                              # full suite
 pytest tests/test_pipeline.py -v              # one module
 pytest tests/test_pipeline.py::test_name -v   # one test
 
-ruff check soc tests run_pipeline.py          # exactly what CI lints (no ruff config file; defaults apply)
+ruff check soc tests run_pipeline.py run_review.py run_eval.py   # exactly what CI lints
 ```
 
 Replay smoke test (this exact command is a CI step — keep it working):
@@ -56,6 +56,8 @@ python3 run_eval.py --pretty                    # local triage vs the labeled se
 python3 run_eval.py --llm                       # model-assisted triage (needs a key)
 python3 run_eval.py --fail-under-thresholds     # gate a build on triage quality
 ```
+
+**Both the Ruff version and its rule set are pinned** — `requirements.txt` bounds the version to a minor range and `ruff.toml` states the rule set explicitly. Neither is incidental: with an unpinned linter and default rules, a Ruff release can turn a green build red without any code change, which is exactly what happened once here. If you need a new rule, enable it in `ruff.toml` and fix the findings in their own commit. Do not blanket-ignore to make a build pass, and note that `UP042` (`StrEnum`) is ignored for a substantive reason documented there, not as a shortcut.
 
 CI runs ruff + pytest + **the local half of the triage evaluation** + the replay smoke test on Linux/macOS/Windows × Python 3.11/3.12. It never touches live Wazuh, Security Onion, OpenRouter, SMTP, or Slack.
 

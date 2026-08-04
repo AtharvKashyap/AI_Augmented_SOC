@@ -9,14 +9,14 @@ remaining tolerant of small model field-name changes.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from soc.enrichment import enrich_indicator
 from soc.models import (
     Alert,
-    AnalysisSource,
     AlertSeverity,
+    AnalysisSource,
     EnrichmentResult,
     EventSource,
     EvidenceItem,
@@ -37,8 +37,7 @@ from soc.report import (
     write_report_file,
 )
 
-
-BASE_TIME = datetime(2026, 6, 10, 12, 0, tzinfo=timezone.utc)
+BASE_TIME = datetime(2026, 6, 10, 12, 0, tzinfo=UTC)
 
 
 def _alert(alert_id: str = "alert-001") -> Alert:

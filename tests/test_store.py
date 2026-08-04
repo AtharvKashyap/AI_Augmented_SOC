@@ -12,7 +12,7 @@ isolated, repeatable, and safe to run in CI.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -84,7 +84,7 @@ def test_upsert_and_get_wazuh_agent(store):
         None. Assertions verify upsert and retrieval behavior.
     """
 
-    last_seen = datetime(2026, 6, 10, 12, 0, tzinfo=timezone.utc)
+    last_seen = datetime(2026, 6, 10, 12, 0, tzinfo=UTC)
     agent = WazuhAgent(
         agent_id="001",
         hostname="endpoint-01",
@@ -136,7 +136,7 @@ def test_save_raw_event_and_alert(store):
         None. Assertions verify raw event and alert persistence.
     """
 
-    event_time = datetime(2026, 6, 10, 12, 30, tzinfo=timezone.utc)
+    event_time = datetime(2026, 6, 10, 12, 30, tzinfo=UTC)
     raw_event = RawEvent(
         id="raw-wazuh-001",
         source=EventSource.WAZUH,
@@ -188,7 +188,7 @@ def test_save_incident_candidate_links_alerts(store):
         None. Assertions verify candidate persistence.
     """
 
-    event_time = datetime(2026, 6, 10, 13, 0, tzinfo=timezone.utc)
+    event_time = datetime(2026, 6, 10, 13, 0, tzinfo=UTC)
     alert = Alert(
         id="alert-002",
         source=EventSource.SECURITY_ONION,
@@ -648,8 +648,8 @@ def test_list_raw_events_for_a_candidate_returns_its_source_events(store):
     raw = RawEvent(
         id="raw-777",
         source=EventSource.WAZUH,
-        received_at=datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc),
-        timestamp=datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc),
+        received_at=datetime(2026, 8, 3, 12, 0, tzinfo=UTC),
+        timestamp=datetime(2026, 8, 3, 12, 0, tzinfo=UTC),
         payload={"rule": {"level": 10, "description": "Test rule"}},
     )
     alert = Alert(
@@ -684,8 +684,8 @@ def test_list_raw_events_for_an_alert_target(store):
     raw = RawEvent(
         id="raw-888",
         source=EventSource.SECURITY_ONION,
-        received_at=datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc),
-        timestamp=datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc),
+        received_at=datetime(2026, 8, 3, 12, 0, tzinfo=UTC),
+        timestamp=datetime(2026, 8, 3, 12, 0, tzinfo=UTC),
         payload={"event": {"severity": 1}},
     )
     alert = Alert(

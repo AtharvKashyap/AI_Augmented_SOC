@@ -10,6 +10,7 @@ real local triage.
 from __future__ import annotations
 
 import json
+from datetime import UTC
 from pathlib import Path
 
 import pytest
@@ -18,8 +19,8 @@ from soc.evaluation import (
     LABELED_SET_DIR,
     EvaluationError,
     EvaluationThresholds,
-    LabelProvenance,
     LabeledCase,
+    LabelProvenance,
     evaluate_cases,
     load_labeled_cases,
 )
@@ -296,7 +297,7 @@ def _seed_reviewed_item(
 ):
     """Seed a store with one reviewed queue item and its source raw event."""
 
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     from soc.models import (
         Alert,
@@ -311,7 +312,7 @@ def _seed_reviewed_item(
     )
     from soc.store import SQLiteStore
 
-    moment = datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc)
+    moment = datetime(2026, 8, 3, 12, 0, tzinfo=UTC)
     store = SQLiteStore(tmp_path / "soc.db")
     store.initialize()
 
@@ -498,8 +499,8 @@ def test_promotion_still_produces_a_rationale_without_notes(tmp_path):
 def test_promotion_skips_targets_with_no_recoverable_events(tmp_path):
     """A verdict whose source events are gone cannot become a labeled case."""
 
-    from soc.models import AnalystVerdict, FalsePositiveLikelihood, TriageAction, TriageResult
     from soc.evaluation import promote_reviews_to_labels
+    from soc.models import AnalystVerdict, FalsePositiveLikelihood, TriageAction, TriageResult
     from soc.store import SQLiteStore
 
     store = SQLiteStore(tmp_path / "soc.db")

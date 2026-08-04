@@ -21,7 +21,7 @@ import argparse
 import json
 import sys
 from collections.abc import Sequence
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -29,7 +29,6 @@ from soc.config import ConfigError, get_settings
 from soc.evaluation import promote_reviews_to_labels
 from soc.models import AnalystVerdict, ReviewQueueItem
 from soc.store import SQLiteStore, StoreError
-
 
 JsonDict = dict[str, Any]
 
@@ -725,8 +724,8 @@ def _format_age(value: datetime | None) -> str:
     if value is None:
         return "-"
     if value.tzinfo is None:
-        value = value.replace(tzinfo=timezone.utc)
-    seconds = int((datetime.now(timezone.utc) - value).total_seconds())
+        value = value.replace(tzinfo=UTC)
+    seconds = int((datetime.now(UTC) - value).total_seconds())
     if seconds < 0:
         return "0m"
     if seconds < 3600:

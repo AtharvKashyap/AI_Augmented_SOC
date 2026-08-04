@@ -30,7 +30,6 @@ from typing import Final
 
 from dotenv import load_dotenv
 
-
 DEFAULT_ENV_FILE: Final[Path] = Path(".env")
 
 

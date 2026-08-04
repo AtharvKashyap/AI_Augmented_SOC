@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import fields, is_dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -29,7 +29,6 @@ from soc.models import (
     TriageResult,
     utc_now,
 )
-
 
 JsonDict = dict[str, Any]
 
@@ -776,7 +775,7 @@ def _build_report_id(candidate_id: str, triage_id: str) -> str:
         Report ID string.
     """
 
-    fingerprint = hashlib.sha256(f"{candidate_id}:{triage_id}".encode("utf-8")).hexdigest()[:12]
+    fingerprint = hashlib.sha256(f"{candidate_id}:{triage_id}".encode()).hexdigest()[:12]
     return f"report-{fingerprint}"
 
 
@@ -792,7 +791,7 @@ def _build_evidence_id(scope_id: str, item_id: str, kind: str) -> str:
         Evidence ID string.
     """
 
-    fingerprint = hashlib.sha256(f"{scope_id}:{kind}:{item_id}".encode("utf-8")).hexdigest()[:12]
+    fingerprint = hashlib.sha256(f"{scope_id}:{kind}:{item_id}".encode()).hexdigest()[:12]
     return f"evidence-{fingerprint}"
 
 
@@ -843,7 +842,7 @@ def _format_time(value: Any) -> str:
 
     if isinstance(value, datetime):
         if value.tzinfo is None:
-            value = value.replace(tzinfo=timezone.utc)
+            value = value.replace(tzinfo=UTC)
         return value.isoformat()
     if value is None:
         return "unknown"

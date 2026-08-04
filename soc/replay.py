@@ -40,12 +40,11 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from soc.models import EventSource, RawEvent
-
 
 JsonDict = dict[str, Any]
 
@@ -244,7 +243,7 @@ def parse_timestamp(value: Any) -> datetime | None:
         raise ReplayError(f"Invalid replay timestamp: {value}") from exc
 
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
+        parsed = parsed.replace(tzinfo=UTC)
 
     return parsed
 

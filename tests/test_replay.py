@@ -11,7 +11,7 @@ or Security Onion alerts to test the pipeline reliably.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -28,7 +28,6 @@ from soc.replay import (
     raw_event_from_dict,
 )
 from soc.triage import local_triage_alert
-
 
 FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 
@@ -82,11 +81,11 @@ def test_load_replay_file_list_format(tmp_path):
     assert all(isinstance(event, RawEvent) for event in events)
     assert events[0].id == "raw-wazuh-001"
     assert events[0].source == EventSource.WAZUH
-    assert events[0].timestamp == datetime(2026, 6, 10, 12, 0, tzinfo=timezone.utc)
+    assert events[0].timestamp == datetime(2026, 6, 10, 12, 0, tzinfo=UTC)
     assert events[0].payload == {"rule": {"level": 10}}
     assert events[1].id == "raw-so-001"
     assert events[1].source == EventSource.SECURITY_ONION
-    assert events[1].timestamp == datetime(2026, 6, 10, 12, 1, tzinfo=timezone.utc)
+    assert events[1].timestamp == datetime(2026, 6, 10, 12, 1, tzinfo=UTC)
 
 
 def test_load_replay_file_object_format(tmp_path):
@@ -278,7 +277,7 @@ def test_parse_timestamp_handles_none_empty_z_and_naive_values():
         10,
         12,
         0,
-        tzinfo=timezone.utc,
+        tzinfo=UTC,
     )
     assert parse_timestamp("2026-06-10T12:00:00") == datetime(
         2026,
@@ -286,7 +285,7 @@ def test_parse_timestamp_handles_none_empty_z_and_naive_values():
         10,
         12,
         0,
-        tzinfo=timezone.utc,
+        tzinfo=UTC,
     )
 
 

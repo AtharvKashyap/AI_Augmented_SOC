@@ -12,7 +12,7 @@ import io
 import json
 import urllib.error
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -41,8 +41,7 @@ from soc.notifier import (
     write_notification_results,
 )
 
-
-BASE_TIME = datetime(2026, 6, 10, 12, 0, tzinfo=timezone.utc)
+BASE_TIME = datetime(2026, 6, 10, 12, 0, tzinfo=UTC)
 
 
 class FakeSMTP:
@@ -78,7 +77,7 @@ class FakeSMTP:
     def __exit__(self, exc_type, exc, traceback) -> None:
         """Exit SMTP context manager."""
 
-        return None
+        return
 
     def starttls(self, context: Any) -> None:
         """Record TLS start."""
@@ -130,7 +129,7 @@ class FakeResponse:
     def __exit__(self, exc_type, exc, traceback) -> None:
         """Exit context manager."""
 
-        return None
+        return
 
     def read(self) -> bytes:
         """Return response body bytes."""

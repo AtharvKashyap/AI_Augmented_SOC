@@ -39,7 +39,6 @@ from typing import Any
 
 from soc.models import utc_now
 
-
 JsonDict = dict[str, Any]
 
 SHUTDOWN_SIGNALS: tuple[signal.Signals, ...] = (signal.SIGINT, signal.SIGTERM)

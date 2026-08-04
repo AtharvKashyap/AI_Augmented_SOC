@@ -8,7 +8,6 @@ import pytest
 
 from soc.config import ConfigError, get_settings
 
-
 WAZUH_ENV_KEYS = [
     "WAZUH_HOST",
     "WAZUH_USER",

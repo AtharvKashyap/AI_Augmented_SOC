@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -48,8 +48,7 @@ from soc.triage import (
     triage_result_from_llm_json,
 )
 
-
-BASE_TIME = datetime(2026, 6, 10, 12, 0, tzinfo=timezone.utc)
+BASE_TIME = datetime(2026, 6, 10, 12, 0, tzinfo=UTC)
 
 
 @dataclass(slots=True)

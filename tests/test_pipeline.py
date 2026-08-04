@@ -11,13 +11,13 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import pytest
-from soc.enrichment import enrich_indicator
 
+from soc.enrichment import enrich_indicator
 from soc.models import (
     Alert,
     AlertSeverity,
@@ -42,8 +42,7 @@ from soc.pipeline import (
 )
 from soc.router import RoutingConfig, TriageRouter
 
-
-BASE_TIME = datetime(2026, 6, 10, 12, 0, tzinfo=timezone.utc)
+BASE_TIME = datetime(2026, 6, 10, 12, 0, tzinfo=UTC)
 
 
 def _raw_event(event_id: str = "raw-001") -> RawEvent:

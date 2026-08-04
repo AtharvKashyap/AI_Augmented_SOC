@@ -18,11 +18,10 @@ Supported inputs:
 from __future__ import annotations
 
 import hashlib
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from soc.models import Alert, AlertSeverity, EventSource, RawEvent
-
 
 JsonDict = dict[str, Any]
 
@@ -484,10 +483,10 @@ def _parse_datetime(value: Any) -> datetime | None:
         return None
     if isinstance(value, datetime):
         if value.tzinfo is None:
-            return value.replace(tzinfo=timezone.utc)
+            return value.replace(tzinfo=UTC)
         return value
     if isinstance(value, int | float):
-        return datetime.fromtimestamp(float(value), tz=timezone.utc)
+        return datetime.fromtimestamp(float(value), tz=UTC)
 
     text = str(value).strip()
     if text == "":
@@ -501,7 +500,7 @@ def _parse_datetime(value: Any) -> datetime | None:
         return None
 
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
+        parsed = parsed.replace(tzinfo=UTC)
     return parsed
 
 

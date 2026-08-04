@@ -26,7 +26,6 @@ from typing import Any
 from soc.config import Settings
 from soc.models import AnalysisSource, RoutingDecision, TriageResult, utc_now
 
-
 JsonDict = dict[str, Any]
 
 

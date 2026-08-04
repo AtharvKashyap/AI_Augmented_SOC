@@ -12,7 +12,7 @@ Security Onion, OpenRouter, Splunk, or OpenBSD services.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -119,7 +119,7 @@ def test_build_raw_event_key():
     event = RawEvent(
         id="raw-001",
         source=EventSource.WAZUH,
-        timestamp=datetime(2026, 6, 10, 12, 0, tzinfo=timezone.utc),
+        timestamp=datetime(2026, 6, 10, 12, 0, tzinfo=UTC),
         payload={"rule": {"level": 7}},
     )
 
@@ -139,7 +139,7 @@ def test_build_alert_key():
     alert = Alert(
         id="alert-001",
         source=EventSource.SECURITY_ONION,
-        timestamp=datetime(2026, 6, 10, 12, 0, tzinfo=timezone.utc),
+        timestamp=datetime(2026, 6, 10, 12, 0, tzinfo=UTC),
         severity=AlertSeverity.HIGH,
         rule_name="ET TROJAN Possible C2 Traffic",
     )
@@ -234,7 +234,7 @@ def test_raw_event_dedup_flow(dedup):
     event = RawEvent(
         id="raw-wazuh-001",
         source=EventSource.WAZUH,
-        timestamp=datetime(2026, 6, 10, 12, 30, tzinfo=timezone.utc),
+        timestamp=datetime(2026, 6, 10, 12, 30, tzinfo=UTC),
         payload={"rule": {"description": "Suspicious PowerShell"}},
     )
 
@@ -258,7 +258,7 @@ def test_alert_dedup_flow(dedup):
     alert = Alert(
         id="alert-wazuh-001",
         source=EventSource.WAZUH,
-        timestamp=datetime(2026, 6, 10, 12, 30, tzinfo=timezone.utc),
+        timestamp=datetime(2026, 6, 10, 12, 30, tzinfo=UTC),
         severity=AlertSeverity.HIGH,
         rule_name="Suspicious PowerShell",
     )

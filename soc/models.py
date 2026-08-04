@@ -24,10 +24,9 @@ The main flow is:
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 from typing import Any
-
 
 JsonDict = dict[str, Any]
 
@@ -39,7 +38,7 @@ def utc_now() -> datetime:
         A timezone-aware UTC datetime.
     """
 
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 class EventSource(str, Enum):

@@ -44,7 +44,6 @@ from soc.normalizer import Normalizer
 from soc.replay import load_replay_file
 from soc.triage import TriageEngine
 
-
 JsonDict = dict[str, Any]
 
 LABELED_SET_DIR = Path("tests/fixtures/labeled")

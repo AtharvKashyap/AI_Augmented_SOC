@@ -22,11 +22,10 @@ import hashlib
 import ipaddress
 import re
 from dataclasses import fields, is_dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from soc.models import Alert, EnrichmentResult, IncidentCandidate, utc_now
-
 
 JsonDict = dict[str, Any]
 
@@ -446,9 +445,7 @@ def _make_enrichment_result(payload: JsonDict) -> EnrichmentResult:
             kwargs[field.name] = payload["indicator"]
         elif field.name == "reputation":
             kwargs[field.name] = payload["severity_hint"]
-        elif field.name == "metadata":
-            kwargs[field.name] = payload["details"]
-        elif field.name == "data":
+        elif field.name == "metadata" or field.name == "data":
             kwargs[field.name] = payload["details"]
         elif field.name == "looked_up_at":
             kwargs[field.name] = payload["looked_up_at"]
@@ -714,4 +711,4 @@ def _utc_iso() -> str:
         UTC ISO timestamp string.
     """
 
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()

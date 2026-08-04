@@ -9,7 +9,7 @@ external threat-intelligence APIs.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -27,8 +27,7 @@ from soc.enrichment import (
 )
 from soc.models import Alert, AlertSeverity, EnrichmentResult, EventSource, IncidentCandidate
 
-
-BASE_TIME = datetime(2026, 6, 10, 12, 0, tzinfo=timezone.utc)
+BASE_TIME = datetime(2026, 6, 10, 12, 0, tzinfo=UTC)
 
 
 def _alert() -> Alert:

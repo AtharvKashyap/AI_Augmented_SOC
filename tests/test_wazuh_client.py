@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-import soc.wazuh_client as wazuh_client
+from soc import wazuh_client
 from soc.config import get_settings
 from soc.models import EventSource, utc_now
 from soc.store import SQLiteStore

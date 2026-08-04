@@ -27,7 +27,6 @@ from soc.evaluation import (
 from soc.openrouter_client import OpenRouterClient, OpenRouterError
 from soc.triage import TriageEngine
 
-
 JsonDict = dict[str, Any]
 
 

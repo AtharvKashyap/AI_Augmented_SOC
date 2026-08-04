@@ -37,7 +37,6 @@ from soc.router import TriageRouter
 from soc.store import SQLiteStore
 from soc.triage import TriageEngine
 
-
 JsonDict = dict[str, Any]
 
 

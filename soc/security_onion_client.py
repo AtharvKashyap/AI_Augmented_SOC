@@ -58,7 +58,7 @@ import urllib.parse
 import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from soc.models import AlertSeverity, EventSource, RawEvent, utc_now
@@ -254,7 +254,7 @@ class SecurityOnionClient:
         self._ssl_context = _build_ssl_context(config.verify_tls)
 
     @classmethod
-    def from_settings(cls, settings: "Settings") -> "SecurityOnionClient":
+    def from_settings(cls, settings: Settings) -> SecurityOnionClient:
         """Build a Connect API client from application settings.
 
         Optional attributes are read with getattr defaults so a Settings object
@@ -348,7 +348,7 @@ class SecurityOnionClient:
             SecurityOnionRequestError: If the token request fails.
         """
 
-        credentials = f"{self.config.client_id}:{self.config.client_secret}".encode("utf-8")
+        credentials = f"{self.config.client_id}:{self.config.client_secret}".encode()
         encoded_credentials = base64.b64encode(credentials).decode("ascii")
         headers = {
             "Authorization": f"Basic {encoded_credentials}",
@@ -916,8 +916,8 @@ def _ensure_utc(value: datetime) -> datetime:
     """
 
     if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 def _expiry_from_expires_in(value: Any) -> datetime | None:
@@ -973,7 +973,7 @@ def _build_ssl_context(verify_tls: bool) -> ssl.SSLContext | None:
 
     if verify_tls:
         return None
-    return ssl._create_unverified_context()  # noqa: S323
+    return ssl._create_unverified_context()
 
 
 def _json_request(

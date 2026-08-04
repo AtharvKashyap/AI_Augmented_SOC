@@ -36,7 +36,6 @@ from soc.normalizer import NormalizationError, Normalizer
 from soc.replay import ReplayError, ReplayLoadResult, load_replay_directory, load_replay_file
 from soc.store import IngestCursor, SQLiteStore, StoreError, StoreStats
 
-
 __version__ = "0.1.0"
 
 __all__ = [
@@ -57,9 +56,9 @@ __all__ = [
     "NormalizationError",
     "Normalizer",
     "RawEvent",
-    "ReviewQueueItem",
     "ReplayError",
     "ReplayLoadResult",
+    "ReviewQueueItem",
     "RoutingDecision",
     "RoutingStatus",
     "SQLiteStore",

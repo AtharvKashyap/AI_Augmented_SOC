@@ -29,7 +29,7 @@ import urllib.parse
 import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -314,7 +314,7 @@ class WazuhManagerClient:
     def _request_token(self) -> str:
         """Request a raw JWT token from Wazuh Manager."""
 
-        credentials = f"{self.config.username}:{self.config.password}".encode("utf-8")
+        credentials = f"{self.config.username}:{self.config.password}".encode()
         encoded_credentials = base64.b64encode(credentials).decode("ascii")
         headers = {"Authorization": f"Basic {encoded_credentials}"}
         response = _text_request(
@@ -588,10 +588,10 @@ class WazuhClient:
     @classmethod
     def from_settings(
         cls,
-        settings: "Settings",
+        settings: Settings,
         *,
         cursor_store: IngestCursorStore | None = None,
-    ) -> "WazuhClient":
+    ) -> WazuhClient:
         """Build a Manager-only Wazuh client from application settings.
 
         Inputs:
@@ -691,7 +691,7 @@ def raw_event_from_alert_json(
     )
 
 
-def _has_manager_settings(settings: "Settings") -> bool:
+def _has_manager_settings(settings: Settings) -> bool:
     """Return whether optional Wazuh Manager settings are configured."""
 
     return all(
@@ -764,8 +764,8 @@ def _ensure_utc(value: datetime) -> datetime:
     """Return datetime as timezone-aware UTC."""
 
     if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 def _nested_str(payload: JsonDict, path: list[str]) -> str | None:
@@ -816,7 +816,7 @@ def _build_ssl_context(verify_tls: bool) -> ssl.SSLContext | None:
 
     if verify_tls:
         return None
-    return ssl._create_unverified_context()  # noqa: S323
+    return ssl._create_unverified_context()
 
 
 def _json_request(
