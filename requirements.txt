@@ -10,7 +10,7 @@ python-dotenv>=1.2.2
 requests>=2.34.2
 
 # Testing
-pytest>=9.0.3
+pytest>=9.1.1
 
 # Linting / code quality.
 # Pinned to a minor range on purpose: the enabled rule set changes between
