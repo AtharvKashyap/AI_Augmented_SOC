@@ -50,6 +50,11 @@ class FakeSettings:
     openrouter_app_name: str = "AI_Augmented_SOC"
     poll_interval_seconds: int = 120
     log_dir: Path = Path("logs")
+    asset_inventory_path: str = ""
+    virustotal_api_key: str = ""
+    abuseipdb_api_key: str = ""
+    shodan_api_key: str = ""
+    enrichment_cache_ttl_hours: int = 24
 
 
 @dataclass(slots=True)
@@ -125,6 +130,7 @@ class FakeSOCPipeline:
         config: FakePipelineConfig,
         notifier: FakeNotifierDispatcher,
         triage_engine: Any = None,
+        asset_inventory: Any = None,
     ) -> None:
         """Initialize fake pipeline."""
 
@@ -133,6 +139,7 @@ class FakeSOCPipeline:
         self.notifier = notifier
         self.triage_engine = triage_engine
         self.store = FakeStore(db_path)
+        self.asset_inventory = asset_inventory
         self.replay_file_calls: list[Path] = []
         self.replay_directory_calls: list[Path] = []
         self.run_events_calls: list[list[Any]] = []
@@ -146,6 +153,8 @@ class FakeSOCPipeline:
         config: FakePipelineConfig,
         notifier: FakeNotifierDispatcher,
         triage_engine: Any = None,
+        asset_inventory: Any = None,
+        intel_enricher: Any = None,
     ) -> FakeSOCPipeline:
         """Record pipeline construction and return fake instance."""
 
@@ -155,9 +164,11 @@ class FakeSOCPipeline:
                 "config": config,
                 "notifier": notifier,
                 "triage_engine": triage_engine,
+                "asset_inventory": asset_inventory,
+                "intel_enricher": intel_enricher,
             }
         )
-        return cls(db_path, config, notifier, triage_engine)
+        return cls(db_path, config, notifier, triage_engine, asset_inventory)
 
     def run_replay_file(self, path: Path) -> FakeRunResult:
         """Record replay file call."""
@@ -305,6 +316,7 @@ def _args(**overrides: Any) -> argparse.Namespace:
         "no_dedup": False,
         "fail_fast": False,
         "no_llm": False,
+        "no_intel": False,
         "daemon": False,
         "poll_interval": None,
         "max_cycles": None,
@@ -1016,3 +1028,115 @@ def test_run_from_args_security_onion_daemon_builds_client_once(monkeypatch, tmp
 
     assert len(FakeSecurityOnionClient.settings_calls) == 1
     assert FakeSecurityOnionClient.last_instance.fetch_calls == 3
+
+
+def test_run_from_args_loads_the_asset_inventory_when_configured(monkeypatch, tmp_path):
+    """A configured inventory must actually reach the pipeline."""
+
+    settings = _patch_cli_dependencies(monkeypatch, tmp_path)
+    inventory_path = tmp_path / "assets.csv"
+    inventory_path.write_text(
+        "hostname,owner,criticality,internet_facing\nendpoint-01,platform,critical,true\n",
+        encoding="utf-8",
+    )
+    settings.asset_inventory_path = str(inventory_path)
+    replay_file = tmp_path / "replay.json"
+    replay_file.write_text("[]", encoding="utf-8")
+
+    run_from_args(_args(replay=replay_file))
+
+    inventory = FakeSOCPipeline.created[0]["asset_inventory"]
+    assert inventory is not None
+    assert len(inventory) == 1
+
+
+def test_run_from_args_without_an_inventory_passes_none(monkeypatch, tmp_path):
+    """No inventory configured is normal and must not fabricate one."""
+
+    _patch_cli_dependencies(monkeypatch, tmp_path)
+    replay_file = tmp_path / "replay.json"
+    replay_file.write_text("[]", encoding="utf-8")
+
+    run_from_args(_args(replay=replay_file))
+
+    assert FakeSOCPipeline.created[0]["asset_inventory"] is None
+
+
+def test_run_from_args_reports_an_unreadable_inventory_as_a_cli_error(monkeypatch, tmp_path):
+    """A configured-but-missing inventory is a misconfiguration worth surfacing.
+
+    Silently continuing would leave triage quietly blind to asset criticality
+    while looking healthy.
+    """
+
+    settings = _patch_cli_dependencies(monkeypatch, tmp_path)
+    settings.asset_inventory_path = str(tmp_path / "does_not_exist.csv")
+    replay_file = tmp_path / "replay.json"
+    replay_file.write_text("[]", encoding="utf-8")
+
+    with pytest.raises(CliError, match="asset inventory"):
+        run_from_args(_args(replay=replay_file))
+
+
+def test_no_intel_providers_configured_means_no_intel_enricher(monkeypatch, tmp_path):
+    """Running with no threat-intel keys is the default and must stay offline."""
+
+    _patch_cli_dependencies(monkeypatch, tmp_path)
+    replay_file = tmp_path / "replay.json"
+    replay_file.write_text("[]", encoding="utf-8")
+
+    summary = run_from_args(_args(replay=replay_file))
+
+    assert FakeSOCPipeline.created[0]["intel_enricher"] is None
+    assert summary["intel_providers"] == []
+
+
+def test_configured_intel_providers_are_wired_and_reported(monkeypatch, tmp_path):
+    """Only providers with a configured key should be queried, and be visible."""
+
+    settings = _patch_cli_dependencies(monkeypatch, tmp_path)
+    settings.virustotal_api_key = "vt-key"
+    settings.abuseipdb_api_key = "abuse-key"
+    replay_file = tmp_path / "replay.json"
+    replay_file.write_text("[]", encoding="utf-8")
+
+    summary = run_from_args(_args(replay=replay_file))
+
+    enricher = FakeSOCPipeline.created[0]["intel_enricher"]
+    assert enricher is not None
+    assert {provider.name for provider in enricher.providers} == {"virustotal", "abuseipdb"}
+    assert summary["intel_providers"] == ["abuseipdb", "virustotal"]
+
+
+def test_no_intel_flag_disables_configured_providers(monkeypatch, tmp_path):
+    """An operator must be able to force a run fully offline."""
+
+    settings = _patch_cli_dependencies(monkeypatch, tmp_path)
+    settings.virustotal_api_key = "vt-key"
+    replay_file = tmp_path / "replay.json"
+    replay_file.write_text("[]", encoding="utf-8")
+
+    summary = run_from_args(_args(replay=replay_file, no_intel=True))
+
+    assert FakeSOCPipeline.created[0]["intel_enricher"] is None
+    assert summary["intel_providers"] == []
+
+
+def test_intel_enricher_uses_the_pipeline_store_as_its_cache(monkeypatch, tmp_path):
+    """Without the shared cache, every run would re-pay for the same indicators."""
+
+    settings = _patch_cli_dependencies(monkeypatch, tmp_path)
+    settings.virustotal_api_key = "vt-key"
+    replay_file = tmp_path / "replay.json"
+    replay_file.write_text("[]", encoding="utf-8")
+
+    run_from_args(_args(replay=replay_file))
+
+    enricher = FakeSOCPipeline.created[0]["intel_enricher"]
+    assert enricher.cache is FakeSOCPipeline.last_instance.store
+
+
+def test_build_parser_accepts_no_intel_flag():
+    """The offline override must be reachable from the command line."""
+
+    assert build_parser().parse_args(["--wazuh", "--no-intel"]).no_intel is True

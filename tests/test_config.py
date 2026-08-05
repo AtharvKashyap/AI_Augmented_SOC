@@ -360,3 +360,33 @@ def test_validate_security_onion_requires_connect_api_credentials(tmp_path):
 
     with pytest.raises(ConfigError, match="SECURITYONION_CLIENT_SECRET"):
         settings.validate_security_onion()
+
+
+def test_asset_inventory_path_is_loaded(tmp_path):
+    """Asset context needs a configurable inventory location.
+
+    Inputs:
+        tmp_path: Pytest temporary directory fixture.
+
+    Outputs:
+        None. Assertion verifies the configured path is loaded.
+    """
+
+    env_file = _write_env_file(tmp_path, "ASSET_INVENTORY_PATH=data/assets.csv")
+
+    assert str(get_settings(env_file, reload=True).asset_inventory_path) == "data/assets.csv"
+
+
+def test_asset_inventory_path_defaults_to_empty(tmp_path):
+    """Running without an asset inventory is a normal mode, not an error.
+
+    Inputs:
+        tmp_path: Pytest temporary directory fixture.
+
+    Outputs:
+        None. Assertion verifies the default is empty.
+    """
+
+    env_file = _write_env_file(tmp_path, "OUTPUT_DIR=output")
+
+    assert str(get_settings(env_file, reload=True).asset_inventory_path) == ""

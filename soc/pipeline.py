@@ -203,6 +203,8 @@ class SOCPipeline:
         store: StoreProtocol | None = None,
         clusterer: AlertClusterer | None = None,
         enricher: LocalEnricher | None = None,
+        intel_enricher: Any | None = None,
+        asset_inventory: Any | None = None,
         triage_engine: TriageEngine | None = None,
         router: TriageRouter | None = None,
         reporter: MarkdownReportBuilder | None = None,
@@ -217,6 +219,10 @@ class SOCPipeline:
             store: Optional store object.
             clusterer: Optional AlertClusterer.
             enricher: Optional LocalEnricher.
+            intel_enricher: Optional external threat-intel enricher. Omitted means
+                local enrichment only, which needs no API keys.
+            asset_inventory: Optional asset inventory used to attach asset
+                context. Omitted means no asset context, which is normal.
             triage_engine: Optional TriageEngine.
             router: Optional TriageRouter.
             reporter: Optional MarkdownReportBuilder.
@@ -232,6 +238,8 @@ class SOCPipeline:
         self.store = store
         self.clusterer = clusterer or AlertClusterer()
         self.enricher = enricher or LocalEnricher()
+        self.intel_enricher = intel_enricher
+        self.asset_inventory = asset_inventory
         self.triage_engine = triage_engine or TriageEngine()
         self.router = router or TriageRouter()
         self.reporter = reporter or MarkdownReportBuilder()
@@ -452,6 +460,7 @@ class SOCPipeline:
             PipelineItemResult or None if required processing failed.
         """
 
+        self._attach_asset_context(candidate, errors)
         self._save_candidate(candidate, errors)
         enrichments = self._enrich_candidate(candidate, errors)
         triage = self._triage_candidate(candidate, enrichments, errors)
@@ -498,11 +507,19 @@ class SOCPipeline:
             EnrichmentResult list.
         """
 
+        enrichments: list[EnrichmentResult] = []
         try:
-            return self.enricher.enrich_candidate(candidate)
+            enrichments.extend(self.enricher.enrich_candidate(candidate))
         except Exception as exc:
             self._handle_error(errors, f"enrichment failed for {candidate.id}: {exc}")
-            return []
+
+        if self.intel_enricher is not None:
+            try:
+                enrichments.extend(self.intel_enricher.enrich_candidate(candidate))
+            except Exception as exc:
+                # A provider outage costs the lookup, never the run.
+                self._handle_error(errors, f"threat intel enrichment failed for {candidate.id}: {exc}")
+        return enrichments
 
     def _triage_candidate(
         self,
@@ -686,6 +703,40 @@ class SOCPipeline:
             self.store.save_routing_decision(routing)
         except Exception as exc:
             self._handle_error(errors, f"save routing failed for {routing.id}: {exc}")
+
+    def _attach_asset_context(self, candidate: IncidentCandidate, errors: list[str]) -> None:
+        """Attach inventory context for the candidate's primary asset.
+
+        Asset criticality is often what separates queueing from paging, so this
+        runs before enrichment and triage. A missing or broken inventory is
+        recorded and skipped: unknown asset context is normal, and losing the
+        alert over it would not be.
+
+        Inputs:
+            candidate: IncidentCandidate to annotate.
+            errors: Mutable error list.
+
+        Outputs:
+            None. The candidate's asset_context is set when a match is found.
+        """
+
+        if self.asset_inventory is None:
+            return
+
+        first_src_ip = candidate.src_ips[0] if candidate.src_ips else None
+        try:
+            context = self.asset_inventory.lookup(
+                hostname=candidate.primary_host,
+                ip=first_src_ip,
+            )
+        except Exception as exc:
+            self._handle_error(errors, f"asset lookup failed for {candidate.id}: {exc}")
+            return
+
+        if context is None:
+            return
+        to_dict = getattr(context, "to_dict", None)
+        candidate.asset_context = to_dict() if callable(to_dict) else dict(context)
 
     def _enqueue_for_review(
         self,

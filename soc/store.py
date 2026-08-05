@@ -540,6 +540,109 @@ class SQLiteStore:
                 ),
             )
 
+    def get_cached_enrichment(
+        self,
+        provider: str,
+        indicator_type: str,
+        indicator: str,
+    ) -> JsonDict | None:
+        """Return a cached provider lookup, or None when absent or stale.
+
+        Threat-intel providers are rate limited and often free tier, so repeated
+        indicators must not cause repeated calls. An expired entry is reported as
+        a miss rather than returned, so stale intel is never trusted.
+
+        Inputs:
+            provider: Provider name, for example virustotal.
+            indicator_type: Indicator type, for example ip or domain.
+            indicator: Indicator value.
+
+        Outputs:
+            Cached payload dictionary, or None on a miss or expiry.
+        """
+
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT payload_json, expires_at FROM enrichment_cache
+                WHERE provider = ? AND indicator_type = ? AND indicator = ?
+                """,
+                (provider, indicator_type, indicator),
+            ).fetchone()
+
+        if row is None:
+            return None
+
+        expires_at = _text_to_dt(row["expires_at"])
+        if expires_at is not None and expires_at <= utc_now():
+            return None
+
+        payload = json.loads(row["payload_json"])
+        return payload if isinstance(payload, dict) else None
+
+    def put_cached_enrichment(
+        self,
+        provider: str,
+        indicator_type: str,
+        indicator: str,
+        payload: JsonDict,
+        *,
+        ttl_hours: int = 24,
+    ) -> None:
+        """Cache one provider lookup with a time to live.
+
+        Inputs:
+            provider: Provider name.
+            indicator_type: Indicator type.
+            indicator: Indicator value.
+            payload: JSON-safe provider payload to cache.
+            ttl_hours: Hours the entry stays valid.
+
+        Outputs:
+            None. The entry is inserted or replaced.
+        """
+
+        now = utc_now()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO enrichment_cache (
+                    provider, indicator_type, indicator, payload_json,
+                    looked_up_at, expires_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(provider, indicator_type, indicator) DO UPDATE SET
+                    payload_json = excluded.payload_json,
+                    looked_up_at = excluded.looked_up_at,
+                    expires_at = excluded.expires_at
+                """,
+                (
+                    provider,
+                    indicator_type,
+                    indicator,
+                    _to_json(payload),
+                    _dt_to_text(now),
+                    _dt_to_text(now + timedelta(hours=max(ttl_hours, 0))),
+                ),
+            )
+
+    def delete_expired_enrichment_cache(self) -> int:
+        """Remove expired cache entries.
+
+        Inputs:
+            None.
+
+        Outputs:
+            Number of entries removed.
+        """
+
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "DELETE FROM enrichment_cache WHERE expires_at <= ?",
+                (_dt_to_text(utc_now()),),
+            )
+            return int(cursor.rowcount or 0)
+
     def list_raw_events_for_target(self, target_id: str, target_type: str) -> list[JsonDict]:
         """Return the original raw events behind an alert or incident candidate.
 
@@ -1108,6 +1211,19 @@ CREATE TABLE IF NOT EXISTS dedup_keys (
 
 CREATE INDEX IF NOT EXISTS idx_dedup_keys_expires_at
     ON dedup_keys(expires_at);
+
+CREATE TABLE IF NOT EXISTS enrichment_cache (
+    provider TEXT NOT NULL,
+    indicator_type TEXT NOT NULL,
+    indicator TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    looked_up_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    PRIMARY KEY (provider, indicator_type, indicator)
+);
+
+CREATE INDEX IF NOT EXISTS idx_enrichment_cache_expiry
+    ON enrichment_cache(expires_at);
 
 CREATE TABLE IF NOT EXISTS analyst_queue (
     triage_result_id TEXT PRIMARY KEY,

@@ -1,0 +1,5 @@
+hostname,ip,owner,criticality,internet_facing,department,os
+web-01.corp.local,203.0.113.10,platform-team,critical,true,IT Infrastructure,Ubuntu 22.04 LTS
+wks-104,10.0.5.104,jdoe,low,no,Sales,Windows 11
+dc-01.corp.local,10.0.1.5,ad-admins,Tier-0,FALSE,IT Infrastructure,Windows Server 2022
+legacy-print,10.0.9.9,,medium,,Facilities,

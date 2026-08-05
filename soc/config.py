@@ -96,6 +96,10 @@ class Settings:
     abuseipdb_api_key: str
     shodan_api_key: str
     enrichment_cache_ttl_hours: int
+    # Deliberately a string rather than a Path: this setting is optional, and
+    # Path("") normalizes to Path("."), which would make "no inventory
+    # configured" indistinguishable from "the current directory".
+    asset_inventory_path: str
 
     # Notification settings
     email_enabled: bool
@@ -422,6 +426,7 @@ def _load_settings_from_env() -> Settings:
         abuseipdb_api_key=_get_str("ABUSEIPDB_API_KEY", ""),
         shodan_api_key=_get_str("SHODAN_API_KEY", ""),
         enrichment_cache_ttl_hours=_get_int("ENRICHMENT_CACHE_TTL_HOURS", 24, minimum=1),
+        asset_inventory_path=_get_str("ASSET_INVENTORY_PATH", ""),
         email_enabled=_get_bool("EMAIL_ENABLED", False),
         smtp_host=_get_str("SMTP_HOST", ""),
         smtp_port=_get_int("SMTP_PORT", 587, minimum=1, maximum=65535),

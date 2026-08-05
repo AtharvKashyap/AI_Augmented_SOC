@@ -28,7 +28,7 @@ Live Wazuh mode (needs a readable `alerts.json`; see "Wazuh ingestion" below):
 python3 run_pipeline.py --wazuh --db data/wazuh_test.db --output output --pretty
 ```
 
-Add `--no-llm` to any run to force deterministic local triage regardless of `OPENROUTER_API_KEY`. Check `triage_mode` and `local_fallbacks` in the JSON summary to see which engine actually scored the run.
+Add `--no-intel` to skip external threat-intel providers, or `--no-llm` to force deterministic local triage regardless of `OPENROUTER_API_KEY`. Check `triage_mode` and `local_fallbacks` in the JSON summary to see which engine actually scored the run.
 
 Security Onion mode (Connect API — **requires a Security Onion Pro licence**):
 
@@ -91,6 +91,19 @@ Things that only become clear after reading several files:
 - **Never bind a filesystem identifier to a SQLite INTEGER column.** Windows `st_ino` is a 128-bit file ID: binding it raises `OverflowError`, and a numeric-looking *string* in a column with INTEGER affinity is silently converted to a float, losing precision and quietly breaking rotation detection. `IngestCursor.file_identity` is therefore one deliberately non-numeric `"<device>-<inode>"` TEXT token, since only equality is ever needed. This was a Windows-only failure that all local runs and both non-Windows CI jobs passed.
 - **`SQLiteStore.initialize()` migrates before it creates.** `CREATE TABLE IF NOT EXISTS` leaves older databases on their original schema, so `_apply_column_migrations` runs first and `ALTER TABLE`s any column listed in `_ADDED_COLUMNS` that is missing. Order matters: indexes in `_SCHEMA_SQL` may reference columns that only exist after migration. When you add a column to an existing table, add it to both places.
 
+### External enrichment
+
+`soc/threat_intel.py` is the only place providers plug in. Four rules are enforced by the layer, not left to each provider — read them before adding a fifth provider:
+
+- **Internal addresses are never sent upstream.** Querying `10.0.1.50` at a third party discloses internal addressing, returns nothing, and burns quota. `_is_global_ip` drops non-global addresses before any call. This also excludes RFC 5737 documentation ranges (`203.0.113.x`, `198.51.100.x`), so most of this repo's fixtures deliberately produce no lookups — use a genuinely routable address in a test that needs one.
+- **A provider failure is contained**, logged and skipped, so an outage costs one lookup rather than the run.
+- **The verdict must live in `summary`.** `ENRICHMENT_CONTEXT_FIELDS` withholds `raw` from the model, so a verdict recorded only in the details would never reach triage. Provider details exist for auditability, not for the prompt.
+- **`to_enrichment_result` drops risk factors for non-escalating verdicts.** Local scoring boosts on any risk factor, so a provider reporting one alongside a clean verdict would silently inflate scores. The invariant is enforced at the boundary so no provider has to remember it.
+
+Verdict policies differ on purpose. VirusTotal treats a **single** flagging engine as `SUSPICIOUS` rather than `MALICIOUS`, because one engine hit is usually a false positive. Shodan can **never** return `MALICIOUS` — it reports what a host exposes, not whether it is bad, and a host with 40 open ports is usually a load balancer. Answers are cached in `enrichment_cache` keyed per provider *and* indicator type; failures are deliberately not cached, since caching one would suppress retries for the whole TTL.
+
+`ASSET_INVENTORY_PATH` is a **string, not a `Path`**, because `Path("")` normalizes to `Path(".")`, which would make "no inventory configured" indistinguishable from "the current directory". An absent inventory is normal; a configured-but-unreadable one fails loudly, because continuing would leave triage blind to asset criticality while the run still looked healthy.
+
 ### Triage quality is measured, not assumed
 
 `soc/evaluation.py` is the only thing in this project that asks whether the answers are *right* rather than merely produced. Read it before touching scoring, prompts, or the router.
@@ -149,6 +162,7 @@ Config tests write a throwaway `.env.test` under `tmp_path` and `monkeypatch.del
 - One test module per `soc` module (`tests/test_<module>.py`), fixtures in `tests/fixtures/`. Live-integration tests fake the transport rather than hitting the network.
 - `tests/conftest.py` snapshots and restores `os.environ` and the settings cache around every test. This is load-bearing: `get_settings` uses `load_dotenv`, which writes into `os.environ` permanently and does **not** override variables that are already set, so without isolation one test's `.env` silently wins over a later test's and the suite becomes order-dependent.
 - Assert on score *bands*, never exact triage scores, so tuning the heuristic does not produce false failures.
+- **Fake credentials in tests must be low-entropy and self-describing**, e.g. `"fake-key-do-not-report"`, and must not be assigned to a name like `API_KEY`. A random-looking value trips the Gitleaks job, and on entropy alone a scanner cannot tell a sentinel from a real key. Note the PR-mode scan covers the whole PR commit range, so removing a flagged string in a *later* commit does not clear it — the branch history has to not contain it.
 - **Never hardcode byte arithmetic in a test.** Windows text-mode writes translate `\n` to `\r\n`, so `len(text) + 1` is a POSIX-only assumption that fails there. Compare against the actual `st_size`, or capture a size before and after and compare those. Two Windows-only CI failures came from this. The reader itself reads in binary and counts real bytes, so CRLF input is handled correctly and there is a test proving it.
 
 ## Not built yet

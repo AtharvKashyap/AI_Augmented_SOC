@@ -240,38 +240,54 @@ Verified end to end with real components: pipeline run → item queued at score 
 ### Phase 3 — Enrichment
 **Goal:** Attach threat intel and asset context to each alert or incident candidate before triage so the LLM has more signal.
 
-Nothing in this phase is started. `LocalEnricher` provides deterministic local IOC extraction and IP classification today, which is what the pipeline currently feeds to triage; the external providers below are all unimplemented despite having keys in `.env.example`.
+Implemented. `soc/threat_intel.py` defines the provider layer; `soc/assets.py`, `soc/virustotal_client.py`, `soc/abuseipdb_client.py` and `soc/shodan_client.py` are the pieces behind it. `LocalEnricher` still runs first and external results are added to it, so enrichment degrades to local-only when no keys are configured.
+
+**None of it has run against a live provider API.** Every provider is tested against a faked transport, exactly like the Wazuh and Security Onion clients.
+
+Four rules are enforced by the layer rather than left to each provider:
+
+- **Internal addresses are never sent upstream.** Querying `10.0.1.50` at a third party discloses internal addressing, returns nothing useful, and burns free-tier quota. Non-global addresses are dropped before any call. Note this also excludes RFC 5737 documentation ranges, so fixtures using `203.0.113.x` will not trigger lookups.
+- **A provider failure is contained** — logged and skipped, so an outage costs one lookup rather than the run.
+- **The verdict must live in the `summary`**, because the triage allowlist withholds enrichment `raw` from the model. A verdict recorded only in the details would never reach triage.
+- **Risk factors are dropped for non-escalating verdicts** by `IntelLookup.to_enrichment_result`, not left to provider discipline. Local scoring boosts on any risk factor, so a provider reporting one alongside a clean verdict would silently inflate scores.
 
 #### Milestone 3.1 — Asset context lookup
-- [ ] Load `assets.csv` into memory at startup — no asset code exists anywhere in `soc/`
-- [ ] Match alert `hostname` and `src_ip` to asset inventory
-- [ ] Attach: `owner`, `criticality`, `internet_facing`, `department` to alert context
-- [ ] Handle missing matches gracefully (unknown asset)
-- [ ] Add the `asset_context` field to `IncidentCandidate` that Milestone 2.0 specified
+- [x] Load an asset CSV at startup — `soc/assets.py`, via `ASSET_INVENTORY_PATH`. Unknown extra columns are ignored, since a real CMDB export has more columns than we care about.
+- [x] Match alert `hostname` and `src_ip` to asset inventory — hostname first, then IP. Matching is case-insensitive and resolves short name against FQDN in both directions, because alerts and CMDBs disagree about FQDNs constantly.
+- [x] Attach `owner`, `criticality`, `internet_facing`, `department` to candidate context, and put `asset_context` in the triage allowlist: asset criticality is often what separates queueing from paging.
+- [x] Handle missing matches gracefully — an unknown asset, an absent inventory, and an unrecognized criticality value all degrade rather than raise. A configured-but-unreadable inventory does fail loudly, because continuing would leave triage quietly blind while the run looked healthy.
+- [x] Add the `asset_context` field to `IncidentCandidate` that Milestone 2.0 specified
 
 #### Milestone 3.2 — VirusTotal enrichment
-- [ ] Implement VT IP reputation lookup (`/api/v3/ip_addresses/{ip}`)
-- [ ] Implement VT domain lookup (`/api/v3/domains/{domain}`)
-- [ ] Parse: malicious vote count, last analysis stats, known threat actor tags
-- [ ] Rate limit to 4 req/min on free tier; skip enrichment on rate limit hit
+- [x] VT IP reputation lookup (`/api/v3/ip_addresses/{ip}`) and domain lookup (`/api/v3/domains/{domain}`)
+- [x] Parse analysis counts, reputation and tags into a bounded subset. Verified at 235 bytes with a 50 KB `whois` blob correctly excluded — the payload is cached and persisted, so it must stay small.
+- [x] Rate limit to 4 req/min via `min_seconds_between_calls = 15.0`, enforced by the enricher
+- [x] **A single flagging engine is `SUSPICIOUS`, never `MALICIOUS`** (threshold 2). One engine hit is very often a false positive, and this is the difference between a useful signal and a page-generating machine. Thresholds live in the config so they are tunable.
 
 #### Milestone 3.3 — AbuseIPDB enrichment
-- [ ] Implement AbuseIPDB check endpoint (`/api/v2/check`)
-- [ ] Parse: abuse confidence score, usage type, ISP, country, number of reports
+- [x] AbuseIPDB check endpoint (`/api/v2/check`) with a configurable `maxAgeInDays`
+- [x] Parse confidence score, usage type, ISP, country, report count and allowlist flag into eight bounded keys
+- [x] Verdict boundaries verified exactly: 75 malicious, 74 suspicious, 25 suspicious, 24 unknown, zero-score-zero-reports benign. `isWhitelisted` overrides even a score of 95, because an explicit allowlist is stronger evidence than an aggregate score.
+- [x] A 429 raises with a message saying the daily quota is exhausted — an operational condition someone needs to recognize, not a generic failure
 
 #### Milestone 3.4 — Shodan enrichment
-- [ ] Implement Shodan host lookup (`/shodan/host/{ip}`)
-- [ ] Parse: open ports, detected services, CVEs flagged by Shodan, org name
-- [ ] Cache Shodan results for 24h (results don't change minute to minute)
+- [x] Shodan host lookup (`/shodan/host/{ip}`)
+- [x] Parse open ports, detected services, CVEs and org into a capped subset. The raw `data` banner array is never stored — a host record can be enormous and it gets cached.
+- [x] Cached for 24h by the shared enrichment cache
+- [x] **Shodan can never return `MALICIOUS`, and the enum member is never constructed in the module.** Shodan reports what a host *exposes*, not whether it is bad: an IP with 40 open ports is usually a load balancer. Known CVEs give `SUSPICIOUS`; everything else is `UNKNOWN` with a useful context summary that says so explicitly, so a bare exposure line cannot be misread as either a clean or a bad reputation result.
+- [x] The API key is passed as a query parameter, so it is redacted from every exception and log line. Verified: a 401 names `SHODAN_API_KEY` without disclosing the key.
 
 #### Milestone 3.5 — Wire enrichment into triage context
-- [x] Run enrichment for relevant `src_ip`, `dst_ip`, domain, or URL values before triage when API keys are configured — the wiring exists and runs; only local enrichment flows through it
-- [x] Include enrichment summary in LLM prompt context block
-- [ ] Mark enrichment source and lookup timestamp in `TriageResult` for audit — `EnrichmentResult` carries `provider` and `looked_up_at`, but neither is surfaced on the triage result
-- [ ] Cache enrichment results in SQLite with TTL to avoid repeated third-party API calls — no enrichment cache table exists
-- [ ] Do not send enrichment provider raw responses to the LLM unfiltered; they inherit the 2.1 allowlist rule
+- [x] Run enrichment for relevant indicator values before triage when API keys are configured — external results are appended to local ones, and `--no-intel` forces a fully offline run
+- [x] Include enrichment summary in the LLM prompt context block
+- [x] Mark enrichment provider and lookup timestamp — both are on every `EnrichmentResult` and both are in the triage context allowlist, so the model sees which provider said what and when
+- [x] Cache enrichment results in SQLite with TTL — `enrichment_cache`, keyed per provider *and* indicator type so two providers cannot read each other's answers. Failures are deliberately not cached: caching one would suppress retries for the whole TTL.
+- [x] Never send provider raw responses to the model — they inherit the 2.1 allowlist, which excludes `raw` entirely. Verified end to end.
+- [x] Duplicate indicators are collapsed so the same value is never paid for twice
 
 **Exit criteria:** Triage prompt includes configured VT/AbuseIPDB/Shodan context for known IOCs, and enrichment provider plus lookup timestamp appear on the stored triage result. Measured on the Milestone 2.5 labeled set: enabling enrichment does not regress action agreement, and improves score accuracy on the subset of entries with external IPs. Repeated runs over the same IOCs make zero additional third-party API calls within the TTL.
+
+**Status: mechanisms met, measurement not.** Verified end to end with real providers behind faked transports: asset context and both provider verdicts reached the model, provider raw stayed withheld, external intel escalated the candidate to `page_now`, and a second run over the same indicator made **zero** additional API calls. What is *not* done is the measured half — that needs real provider keys and the labeled set from 2.5, which is still 5 synthetic cases. Do not read this phase as evidence that enrichment improves triage quality; it is evidence that enrichment reaches triage.
 
 ---
 

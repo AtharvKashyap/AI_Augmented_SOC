@@ -761,3 +761,73 @@ def test_ingest_cursor_without_a_stored_identity_still_loads(store):
     assert loaded is not None
     assert loaded.file_identity is None
     assert loaded.byte_offset == 100
+
+
+def test_enrichment_cache_round_trips_a_provider_payload(store):
+    """Cached intel avoids re-querying rate-limited free-tier APIs.
+
+    Inputs:
+        store: Initialized SQLiteStore fixture.
+
+    Outputs:
+        None. Assertions verify the payload round-trips.
+    """
+
+    payload = {"verdict": "malicious", "malicious_votes": 7}
+
+    store.put_cached_enrichment("virustotal", "ip", "203.0.113.10", payload, ttl_hours=24)
+    cached = store.get_cached_enrichment("virustotal", "ip", "203.0.113.10")
+
+    assert cached == payload
+
+
+def test_enrichment_cache_misses_are_none(store):
+    """An uncached indicator is a miss, not an error."""
+
+    assert store.get_cached_enrichment("virustotal", "ip", "203.0.113.99") is None
+
+
+def test_enrichment_cache_is_keyed_per_provider_and_type(store):
+    """Two providers must not read each other's answers."""
+
+    store.put_cached_enrichment("virustotal", "ip", "203.0.113.10", {"v": 1}, ttl_hours=24)
+
+    assert store.get_cached_enrichment("abuseipdb", "ip", "203.0.113.10") is None
+    assert store.get_cached_enrichment("virustotal", "domain", "203.0.113.10") is None
+
+
+def test_expired_enrichment_cache_entries_are_treated_as_misses(store):
+    """Stale intel must be refetched rather than trusted forever."""
+
+    store.put_cached_enrichment("shodan", "ip", "203.0.113.10", {"v": 1}, ttl_hours=24)
+    with store._connect() as conn:
+        conn.execute(
+            "UPDATE enrichment_cache SET expires_at = ? WHERE provider = ?",
+            ("2020-01-01T00:00:00+00:00", "shodan"),
+        )
+
+    assert store.get_cached_enrichment("shodan", "ip", "203.0.113.10") is None
+
+
+def test_put_cached_enrichment_replaces_an_existing_entry(store):
+    """A refetch must overwrite, not accumulate duplicates."""
+
+    store.put_cached_enrichment("virustotal", "ip", "203.0.113.10", {"v": 1}, ttl_hours=24)
+    store.put_cached_enrichment("virustotal", "ip", "203.0.113.10", {"v": 2}, ttl_hours=24)
+
+    assert store.get_cached_enrichment("virustotal", "ip", "203.0.113.10") == {"v": 2}
+
+
+def test_delete_expired_enrichment_cache_reports_how_many_it_removed(store):
+    """Cache pruning must be observable."""
+
+    store.put_cached_enrichment("virustotal", "ip", "203.0.113.10", {"v": 1}, ttl_hours=24)
+    store.put_cached_enrichment("virustotal", "ip", "203.0.113.11", {"v": 1}, ttl_hours=24)
+    with store._connect() as conn:
+        conn.execute(
+            "UPDATE enrichment_cache SET expires_at = ? WHERE indicator = ?",
+            ("2020-01-01T00:00:00+00:00", "203.0.113.10"),
+        )
+
+    assert store.delete_expired_enrichment_cache() == 1
+    assert store.get_cached_enrichment("virustotal", "ip", "203.0.113.11") == {"v": 1}
