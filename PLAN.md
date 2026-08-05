@@ -297,32 +297,34 @@ Four rules are enforced by the layer rather than left to each provider:
 Deterministic Markdown reporting already works and is tested — `MarkdownReportBuilder` renders candidate, triage, routing, and enrichment data into the seven planned sections without an LLM, and the pipeline writes `output/<candidate-id>.md` on every run. That is a better default than planned: reports exist even with no API key, and they are diffable in tests. The remaining work is `INC-*` promotion, LLM-assisted narrative, and delivery.
 
 #### Milestone 4.1 — Incident grouping
-- [ ] Promote high-value `IncidentCandidate` objects into incidents — only `CAND-*` exists today; there is no incident tier
-- [ ] Group related alerts by: common src IP, common dst IP, common agent, common user, overlapping time window (configurable, default 2h)
-- [ ] Assign incident ID (`INC-YYYYMMDD-NNN`)
-- [ ] Store incident-to-alert and incident-to-candidate mapping in SQLite
-- [ ] Define the promotion rule explicitly (score threshold, analyst action, or both) rather than leaving it implicit
+- [x] Promote high-value `IncidentCandidate` objects into incidents — `soc/incidents.py`, wired into the pipeline and disableable via `PipelineConfig.promote_incidents`
+- [x] Group related candidates by common host, user, agent, src IP, dst IP and an overlapping time window (configurable, default 2h) — two views of the same activity become one incident, so an analyst does not investigate the same compromise twice from the endpoint and network sides
+- [x] Assign incident ID `INC-YYYYMMDD-NNN-<hash>` — content-addressed like every other ID here, so a rerun updates rather than duplicating
+- [x] Store incident-to-alert and incident-to-candidate mapping in SQLite — `incidents` plus `incident_candidate_links`. Named `_links` deliberately: `incident_candidates` already existed storing candidate rows, and reusing the name made `CREATE TABLE IF NOT EXISTS` a silent no-op against the wrong schema. Caught by a test.
+- [x] **Promotion rule is explicit and follows the routing decision, not the triage suggestion.** A candidate is promoted when its score clears `min_score` (default 8) or when the router actually paged. `TriageResult.action` is only a suggestion; reading it instead of the routing decision would have made `RoutingConfig` thresholds invisible to the incident tier, recreating the dead-threshold bug removed from the router in Phase 2. Found while writing the pipeline tests.
 
 #### Milestone 4.2 — Report prompt
-- [ ] Write the report system prompt in Python alongside the triage prompt, matching the 2.1 decision — the dead `prompts/report_prompt.txt` was deleted; the current report is templated rather than generated
-- [ ] Prompt accepts: alert timeline (JSON), triage results (JSON), analyst notes (free text)
-- [ ] Prompt returns Markdown report with sections: Executive Summary, Timeline, Affected Assets, IOCs, Attack Narrative, Remediation, Detection Gaps
-- [ ] Prompt context obeys the 2.1 allowlist and truncation rules
+- [x] Report system prompt in Python alongside the triage prompt — `REPORT_SYSTEM_PROMPT` and `REPORT_PROMPT_VERSION = "report-v1"`, matching the 2.1 decision
+- [x] Prompt accepts incident scope, candidate context, triage results, routing decisions, enrichment summaries and analyst notes
+- [x] Prompt requires all seven sections, requires every claim to be grounded in the supplied context naming the entity, forbids inventing hosts, users, addresses, hashes or timestamps, and requires saying when evidence is insufficient and what would settle it. An invented hostname in an incident report is worse than a missing one.
+- [x] Prompt context reuses the 2.1 allowlist and truncation helpers rather than adding a second filtering scheme. Verified by planting a distinctive value in `Alert.raw` and asserting it never appears in the prompt.
 
 #### Milestone 4.3 — Report client
-- [x] Implement `report.py` — done deterministically; all seven sections render from stored data
-- [ ] Add LLM-assisted narrative using the configured OpenRouter report model, with the deterministic renderer as the permanent fallback rather than a stopgap
-- [x] Build full incident context from alert cluster + triage results + enrichment
-- [ ] Call the OpenRouter model with report prompt + incident context
-- [x] Write Markdown report to `output/<id>.md` — currently `output/CAND-*.md`; becomes `output/INC-*.md` once 4.1 lands
-- [ ] Mark LLM-drafted versus templated reports on the report itself, per Milestone 2.6
+- [x] Implement `report.py` — all seven sections render from stored data
+- [x] LLM-assisted narrative with the deterministic renderer as the **permanent** fallback. Only the prose sections are model-drafted; Timeline, Affected Assets, IOCs, Triage Decisions and Enrichment Summary always come from stored data, so a report is produced with no API key. An unusable response is retried once, then templated; a transport failure is not retried, since the client already backs off.
+- [x] Build full incident context from candidates, triage results, routing and enrichment
+- [x] Call the model with the report prompt and incident context, preferring `OPENROUTER_REPORT_MODEL` over `OPENROUTER_MODEL` when set
+- [x] Write Markdown reports to `output/INC-*.md` alongside the existing `output/CAND-*.md`
+- [x] **Mark LLM-drafted versus templated on the report itself**, per Milestone 2.6. A `## Report Provenance` section names the model and prompt version, or states why it was templated. `generated_by_model` is set only for a genuine draft, and a **partial** model response is treated as unusable by design: a report labelled model-drafted is model-drafted throughout.
 
 #### Milestone 4.4 — Report delivery
-- [ ] Implement `run_report.py` CLI: `--incident-id`, `--alerts-file`, `--notes` — the empty placeholder was deleted; create it when implementing
-- [ ] Email delivery of Markdown report as attachment (reuse `notifier.py` SMTP) — `EmailNotifier` sends report text in the body; there is no attachment support
-- [ ] Later phase: post report summary to Splunk via HEC webhook
+- [x] Implement `run_report.py` with `list`, `show` and `generate` subcommands; `generate` takes `--output`, `--notes`/`--notes-file`, `--no-llm` and `--email`
+- [x] Email delivery of the Markdown report as a `text/markdown` attachment, with the summary still in the body so a client that cannot render the attachment is not left with nothing
+- [ ] Later phase: post report summary to Splunk via HEC webhook (Milestone 5.1)
 
-**Exit criteria:** Analyst can run `python3 run_report.py --incident-id INC-20240610-001` and receive a drafted Markdown incident report by email. Every report states whether it was LLM-drafted or templated. The same reporting logic summarizes replay-generated incidents for testing, and report generation still succeeds with no API key configured.
+**Exit criteria:** Analyst can run `python3 run_report.py generate <incident-id>` and receive a drafted Markdown incident report, optionally by email. Every report states whether it was LLM-drafted or templated. The same reporting logic summarizes replay-generated incidents for testing, and report generation still succeeds with no API key configured.
+
+**Status: met, except that no report has been drafted by a real model.** Verified end to end from replay input: candidates promoted to an incident, persisted with its mapping, and both candidate and incident reports written with all seven sections and a correct provenance line. Report generation with no API key works and is labelled templated. What has not happened is a real `--llm` draft against a live model, which is deferred with the rest of live testing.
 
 ---
 

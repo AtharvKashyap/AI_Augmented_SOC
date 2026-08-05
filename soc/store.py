@@ -540,6 +540,117 @@ class SQLiteStore:
                 ),
             )
 
+    def save_incident(self, incident: Any) -> None:
+        """Persist one incident and its candidate mapping.
+
+        Incident IDs are content-addressed, so a rerun over the same candidates
+        produces the same ID. The mapping is rewritten rather than appended to,
+        so repeated saves cannot accumulate duplicate rows.
+
+        Inputs:
+            incident: Incident object exposing to_dict().
+
+        Outputs:
+            None. The incident is inserted or replaced.
+        """
+
+        payload = incident.to_dict()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO incidents (
+                    id, first_seen, last_seen, primary_host, primary_user,
+                    max_score, payload_json, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    incident.id,
+                    _dt_to_text(incident.first_seen),
+                    _dt_to_text(incident.last_seen),
+                    incident.primary_host,
+                    incident.primary_user,
+                    int(incident.max_score),
+                    _to_json(payload),
+                    _dt_to_text(incident.created_at),
+                ),
+            )
+            conn.execute(
+                "DELETE FROM incident_candidate_links WHERE incident_id = ?",
+                (incident.id,),
+            )
+            conn.executemany(
+                """
+                INSERT OR IGNORE INTO incident_candidate_links (incident_id, candidate_id)
+                VALUES (?, ?)
+                """,
+                [(incident.id, candidate_id) for candidate_id in incident.candidate_ids],
+            )
+
+    def get_incident(self, incident_id: str) -> JsonDict | None:
+        """Fetch one incident as its stored payload.
+
+        Inputs:
+            incident_id: Incident ID.
+
+        Outputs:
+            Incident dictionary, or None when absent.
+        """
+
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT payload_json FROM incidents WHERE id = ?",
+                (incident_id,),
+            ).fetchone()
+
+        if row is None:
+            return None
+        payload = json.loads(row["payload_json"])
+        return payload if isinstance(payload, dict) else None
+
+    def list_recent_incidents(self, limit: int | None = None) -> list[JsonDict]:
+        """Return recent incidents, newest first.
+
+        Inputs:
+            limit: Optional maximum number of incidents.
+
+        Outputs:
+            List of incident dictionaries.
+        """
+
+        sql = "SELECT payload_json FROM incidents ORDER BY created_at DESC, id DESC"
+        params: tuple[Any, ...] = ()
+        if limit is not None:
+            sql += " LIMIT ?"
+            params = (limit,)
+
+        with self._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+
+        incidents: list[JsonDict] = []
+        for row in rows:
+            payload = json.loads(row["payload_json"])
+            if isinstance(payload, dict):
+                incidents.append(payload)
+        return incidents
+
+    def list_incident_candidate_ids(self, incident_id: str) -> list[str]:
+        """Return the candidate IDs an incident was built from.
+
+        Inputs:
+            incident_id: Incident ID.
+
+        Outputs:
+            Candidate ID list.
+        """
+
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT candidate_id FROM incident_candidate_links WHERE incident_id = ? ORDER BY candidate_id",
+                (incident_id,),
+            ).fetchall()
+        return [row["candidate_id"] for row in rows]
+
     def get_cached_enrichment(
         self,
         provider: str,
@@ -1211,6 +1322,30 @@ CREATE TABLE IF NOT EXISTS dedup_keys (
 
 CREATE INDEX IF NOT EXISTS idx_dedup_keys_expires_at
     ON dedup_keys(expires_at);
+
+CREATE TABLE IF NOT EXISTS incidents (
+    id TEXT PRIMARY KEY,
+    first_seen TEXT,
+    last_seen TEXT,
+    primary_host TEXT,
+    primary_user TEXT,
+    max_score INTEGER NOT NULL,
+    payload_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_incidents_created
+    ON incidents(created_at);
+
+-- Named *_links deliberately: `incident_candidates` already exists and stores
+-- IncidentCandidate rows. Reusing that name made CREATE TABLE IF NOT EXISTS a
+-- silent no-op against the existing table.
+CREATE TABLE IF NOT EXISTS incident_candidate_links (
+    incident_id TEXT NOT NULL,
+    candidate_id TEXT NOT NULL,
+    PRIMARY KEY (incident_id, candidate_id),
+    FOREIGN KEY(incident_id) REFERENCES incidents(id) ON DELETE CASCADE
+);
 
 CREATE TABLE IF NOT EXISTS enrichment_cache (
     provider TEXT NOT NULL,
