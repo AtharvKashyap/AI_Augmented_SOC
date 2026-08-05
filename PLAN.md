@@ -331,26 +331,42 @@ Deterministic Markdown reporting already works and is tested — `MarkdownReport
 ### Phase 5 — Splunk and OpenBSD visibility integrations
 **Goal:** Add Splunk output/dashboard support and OpenBSD `pflog` firewall visibility after the Wazuh + Security Onion MVP works.
 
-Not started. Milestone 5.2 in particular should not begin until someone has asked for it — it means maintaining two ingestion architectures, and the plan already commits to keeping direct ingestion regardless.
+5.1 and 5.3 implemented. **5.2 deliberately not built** — see the note under that milestone.
+
+Both integrations are optional: with Splunk and pflog unconfigured the pipeline runs exactly as before, and neither has been exercised against a live Splunk instance or a real OpenBSD host.
 
 #### Milestone 5.1 — Splunk output
-- [ ] Push triage results back to Splunk via HEC as custom sourcetype `ai_triage`
-- [ ] Push incident candidate summaries to Splunk for dashboarding
-- [ ] Create saved searches for score distribution, page-now events, likely-benign volume, and repeated hosts/IPs
-- [ ] Create dashboard panels showing queued vs paged vs likely-benign breakdown
+- [x] Push triage results to Splunk via HEC as sourcetype `ai_triage` — `soc/splunk_client.py`, opt-in via `run_pipeline.py --splunk`. Events are newline-delimited JSON objects, which is what HEC expects, batched at `max_batch_events` rather than one request per event.
+- [x] Push incident summaries for dashboarding — counts rather than ID lists, since `candidate_count` reads correctly in a dashboard where `candidate_ids` would imply a list
+- [x] Saved searches in `splunk/savedsearches.conf` for score distribution, page-now events, likely-benign volume and repeated hosts/IPs
+- [x] Dashboard panels in `splunk/dashboard_ai_triage.xml`, including **a panel split by `analysis_source`** — a dashboard that cannot distinguish a model score from a heuristic one would quietly mislead whoever reads it
+- [x] Only derived fields are sent, never raw source events or enrichment `raw`. A Splunk index should not become a second copy of raw telemetry.
+- [x] The HEC token is scrubbed from every exception and log line, since HEC error bodies get quoted into messages. Verified by planting the token in a 500 response body.
+- [x] Sending is opt-in, and requesting it unconfigured fails loudly. A push that fails at runtime is recorded but does not fail the run, because results are already persisted locally.
+- [ ] `--splunk` with `--daemon` is refused rather than silently sending nothing each cycle. Per-cycle pushing is a real feature and is not built.
 
-#### Milestone 5.2 — Splunk input option
+#### Milestone 5.2 — Splunk input option — **not built, pending a decision**
+Deliberately left out rather than quietly skipped. Building it means maintaining two ingestion architectures — direct Wazuh/Security Onion readers *and* a Splunk search client — to serve a capability the project does not currently need, and this milestone itself commits to keeping direct ingestion either way. Every ingestion bug would then need reproducing twice.
 - [ ] Add optional Splunk search client as a later ingestion source
 - [ ] Allow Splunk to become a unified read layer after forwarding is configured
 - [ ] Keep direct Wazuh and Security Onion ingestion available even after Splunk is added
 
+Recommend cutting unless someone specifically wants Splunk as the read layer. Reopen if so.
+
 #### Milestone 5.3 — OpenBSD `pflog` visibility
-- [ ] Add support for ingesting parsed `pflog` firewall events when available
-- [ ] Normalize OpenBSD firewall events into the common alert/event schema
-- [ ] Correlate firewall blocks with Wazuh endpoint alerts and Security Onion network alerts
-- [ ] Include OpenBSD firewall evidence in triage summaries when available
+- [x] Ingest parsed `pflog` events — `soc/pflog.py`, via `run_pipeline.py --pflog`. Unparseable lines are skipped, counted and logged rather than fatal, matching the `alerts.json` reader.
+- [x] Normalize into the common `Alert` schema — `normalize_openbsd_pf_event`. **A `block` maps to `LOW` and a `pass` to `INFO`; nothing in this path can return `HIGH`.** A firewall block is the firewall working as configured, and a busy firewall mapped to high severity would bury real detections. This is the same failure mode as the `private_ip` scoring defect the eval harness caught in Phase 3.
+- [x] Correlate firewall blocks with Wazuh and Security Onion alerts — **this needed no new code**: entity-based clustering already merges a pf event with an endpoint alert sharing an address. Verified, and pinned with a test, because emergent behavior with no test regresses silently.
+- [x] Include firewall evidence in triage context — pf alerts join the candidate's alert list and reach the model through the existing allowlist.
+- [ ] `OPENBSD_PFLOG_TEXT_PATH` is a **separate setting** from `OPENBSD_PFLOG_PATH`. The latter is `/var/log/pflog`, a pcap file the parser cannot read; ingestion reads `tcpdump -n -e -ttt -r` text output. Conflating them would have an operator point the reader at binary data and get a silent zero-result run.
+
+**The pflog line format is inferred, not verified.** No OpenBSD host was available to check real `tcpdump` output against, so the regex lives in a single `PFLOG_LINE_PATTERN` constant marked as inferred, the same approach as the undocumented Security Onion query parameters. A real deployment corrects that constant and the timestamp formats, nothing else.
 
 **Exit criteria:** Triage and incident results can be pushed to Splunk for dashboards, and OpenBSD `pflog` events can be included as additional firewall context when configured. Both are optional: with Splunk and pflog unconfigured, the pipeline runs unchanged and the test suite is unaffected.
+
+**Status: met for 5.1 and 5.3, with 5.2 not built.** Verified end to end: `--pflog` ingested a sample file, skipped one malformed line with a warning, clustered into a candidate and correctly produced **no** incident, since firewall activity alone stays below the promotion bar. The Splunk client's wire format, batching, auth header and token scrubbing were verified against a fake transport.
+
+Not verified: no event has reached a live Splunk instance, and no real `tcpdump` pflog output has been parsed. One tuning observation for live use — three clustered firewall events scored 5 and reached `queue_review`, which on a busy firewall could generate real queue volume. That is a threshold question for the evaluation harness with real data, not something to guess at now.
 
 ---
 

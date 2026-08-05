@@ -17,10 +17,63 @@ from datetime import UTC, datetime
 from soc.models import AlertSeverity, EventSource, RawEvent
 from soc.normalizer import (
     Normalizer,
+    normalize_openbsd_pf_event,
+    severity_from_pf_action,
     severity_from_security_onion,
     severity_from_text_or_number,
     severity_from_wazuh_level,
 )
+
+
+def _pf_raw_event(payload: dict) -> RawEvent:
+    """Build an OpenBSD pf RawEvent around a parsed pflog payload.
+
+    Inputs:
+        payload: Parsed pflog payload as produced by PflogEvent.to_payload().
+
+    Outputs:
+        RawEvent with source EventSource.OPENBSD_PF.
+    """
+
+    return RawEvent(
+        id="openbsd_pf-test-0001",
+        source=EventSource.OPENBSD_PF,
+        timestamp=datetime(2026, 8, 5, 12, 0, tzinfo=UTC),
+        payload=payload,
+    )
+
+
+PF_BLOCK_PAYLOAD = {
+    "timestamp": "2026-08-05T12:00:00.123456+00:00",
+    "action": "block",
+    "direction": "in",
+    "interface": "em0",
+    "rule_number": 12,
+    "protocol": "tcp",
+    "src_ip": "203.0.113.5",
+    "src_port": 4444,
+    "dst_ip": "10.0.1.5",
+    "dst_port": 22,
+    "hostname": "fw-01",
+    "raw_line": (
+        "Aug 05 12:00:00.123456 rule 12/(match) block in on em0: "
+        "203.0.113.5.4444 > 10.0.1.5.22: S 12345:12345(0) win 65535"
+    ),
+}
+
+PF_PASS_PAYLOAD = {
+    "timestamp": "2026-08-05T12:00:01.456789+00:00",
+    "action": "pass",
+    "direction": "out",
+    "interface": "em0",
+    "rule_number": 5,
+    "protocol": "udp",
+    "src_ip": "10.0.1.5",
+    "src_port": 51000,
+    "dst_ip": "8.8.8.8",
+    "dst_port": 53,
+    "raw_line": "Aug 05 12:00:01.456789 rule 5/(match) pass out on em0: 10.0.1.5.51000 > 8.8.8.8.53: udp 40",
+}
 
 
 def test_normalize_wazuh_event_extracts_common_fields():
@@ -316,6 +369,137 @@ def test_normalizer_normalize_many_returns_alerts_in_order():
 
     assert [alert.id for alert in alerts] == ["replay:alert-001", "replay:alert-002"]
     assert [alert.rule_name for alert in alerts] == ["First", "Second"]
+
+
+def test_normalize_openbsd_pf_block_event_maps_firewall_fields():
+    """A pf block should normalize to readable firewall alert fields.
+
+    Inputs:
+        None.
+
+    Outputs:
+        None. Assertions verify normalized Alert fields.
+    """
+
+    alert = Normalizer().normalize(_pf_raw_event(PF_BLOCK_PAYLOAD))
+
+    assert alert.source == EventSource.OPENBSD_PF
+    assert alert.timestamp == datetime(2026, 8, 5, 12, 0, 0, 123456, tzinfo=UTC)
+    assert alert.rule_name == "pf block in on em0"
+    assert alert.rule_groups == ["firewall", "pf", "block"]
+    assert alert.src_ip == "203.0.113.5"
+    assert alert.dst_ip == "10.0.1.5"
+    assert alert.hostname == "fw-01"
+    assert alert.source_severity == "block"
+    assert alert.raw_event_id == "openbsd_pf-test-0001"
+
+
+def test_normalize_openbsd_pf_block_is_low_severity_not_high():
+    """A blocked packet is the firewall working, so it must never be HIGH.
+
+    Inputs:
+        None.
+
+    Outputs:
+        None. Assertion verifies the deliberate LOW ceiling.
+    """
+
+    alert = Normalizer().normalize(_pf_raw_event(PF_BLOCK_PAYLOAD))
+
+    assert alert.severity == AlertSeverity.LOW
+
+
+def test_normalize_openbsd_pf_pass_is_info_severity():
+    """An allowed packet is pure context and normalizes to INFO.
+
+    Inputs:
+        None.
+
+    Outputs:
+        None. Assertion verifies the pass mapping.
+    """
+
+    alert = Normalizer().normalize(_pf_raw_event(PF_PASS_PAYLOAD))
+
+    assert alert.severity == AlertSeverity.INFO
+    assert alert.rule_name == "pf pass out on em0"
+    assert alert.rule_groups == ["firewall", "pf", "pass"]
+    assert alert.hostname is None
+
+
+def test_normalize_openbsd_pf_event_preserves_full_payload_in_raw():
+    """The whole parsed pflog payload stays in Alert.raw for auditability.
+
+    Inputs:
+        None.
+
+    Outputs:
+        None. Assertions verify raw payload preservation.
+    """
+
+    alert = Normalizer().normalize(_pf_raw_event(PF_BLOCK_PAYLOAD))
+
+    assert alert.raw == PF_BLOCK_PAYLOAD
+    assert alert.raw["src_port"] == 4444
+    assert alert.raw["dst_port"] == 22
+    assert alert.raw["raw_line"].startswith("Aug 05 12:00:00.123456 rule 12/(match) block in")
+
+
+def test_openbsd_pf_source_reaches_the_pf_normalizer_not_the_generic_one():
+    """EventSource.OPENBSD_PF must route to the dedicated pf normalizer.
+
+    Generic normalization would find no rule_name, no rule_groups, and no
+    severity in a pflog payload, so this asserts the routing directly.
+
+    Inputs:
+        None.
+
+    Outputs:
+        None. Assertion compares dispatch against the pf normalizer output.
+    """
+
+    event = _pf_raw_event(PF_BLOCK_PAYLOAD)
+
+    dispatched = Normalizer().normalize(event)
+    direct = normalize_openbsd_pf_event(event)
+
+    assert dispatched == direct
+    assert dispatched.rule_groups == ["firewall", "pf", "block"]
+
+
+def test_normalize_openbsd_pf_event_tolerates_missing_fields():
+    """A payload missing action and interface still normalizes.
+
+    Inputs:
+        None.
+
+    Outputs:
+        None. Assertions verify degraded but valid normalization.
+    """
+
+    alert = normalize_openbsd_pf_event(_pf_raw_event({"src_ip": "10.0.1.9", "raw_line": "partial"}))
+
+    assert alert.rule_name == "pf firewall event"
+    assert alert.rule_groups == ["firewall", "pf"]
+    assert alert.src_ip == "10.0.1.9"
+    assert alert.severity == AlertSeverity.INFO
+
+
+def test_severity_from_pf_action_mapping():
+    """pf actions map to context-level severities only.
+
+    Inputs:
+        None.
+
+    Outputs:
+        None. Assertions verify the severity ceiling for firewall activity.
+    """
+
+    assert severity_from_pf_action("block") == AlertSeverity.LOW
+    assert severity_from_pf_action("BLOCK") == AlertSeverity.LOW
+    assert severity_from_pf_action("pass") == AlertSeverity.INFO
+    assert severity_from_pf_action("match") == AlertSeverity.INFO
+    assert severity_from_pf_action(None) == AlertSeverity.INFO
 
 
 def test_severity_from_wazuh_level_mapping():
