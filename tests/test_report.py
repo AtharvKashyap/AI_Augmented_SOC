@@ -9,10 +9,12 @@ remaining tolerant of small model field-name changes.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from soc.enrichment import enrich_indicator
+from soc.incidents import Incident
 from soc.models import (
     Alert,
     AlertSeverity,
@@ -28,11 +30,15 @@ from soc.models import (
     TriageAction,
     TriageResult,
 )
+from soc.openrouter_client import OpenRouterError
 from soc.report import (
+    REPORT_PROMPT_VERSION,
+    REPORT_SYSTEM_PROMPT,
     MarkdownReportBuilder,
     build_alert_report,
     build_candidate_evidence,
     build_candidate_report,
+    build_incident_report,
     create_incident_report,
     write_report_file,
 )
@@ -490,3 +496,559 @@ def test_candidate_report_names_the_model_that_scored_it():
     assert "vendor/model-x" in report
     assert "triage-v1" in report
     assert "deterministic local scoring" not in report.lower()
+
+
+# --- Incident-level reporting (Milestones 4.2 and 4.3) -----------------------
+
+LEAKY_RAW_MARKER = "raw-payload-must-not-leak"
+LEAKY_ENRICHMENT_MARKER = "enrichment-raw-must-not-leak"
+
+
+def _incident_alert(
+    alert_id: str,
+    *,
+    hostname: str = "endpoint-01",
+    minutes: int = 0,
+    rule_name: str = "Suspicious PowerShell execution",
+    dst_ip: str = "203.0.113.10",
+) -> Alert:
+    """Create an alert for incident-level report tests.
+
+    Inputs:
+        alert_id: Alert ID.
+        hostname: Affected host.
+        minutes: Offset from BASE_TIME in minutes.
+        rule_name: Detection rule name.
+        dst_ip: Destination address.
+
+    Outputs:
+        Alert object whose raw payload carries a marker that must never leak.
+    """
+
+    return Alert(
+        id=alert_id,
+        source=EventSource.WAZUH,
+        timestamp=BASE_TIME + timedelta(minutes=minutes),
+        severity=AlertSeverity.HIGH,
+        source_severity=10,
+        rule_name=rule_name,
+        rule_groups=["windows", "powershell"],
+        src_ip="10.0.1.10",
+        dst_ip=dst_ip,
+        hostname=hostname,
+        agent_id="001",
+        agent_os="Windows",
+        user="alice",
+        process_name="powershell.exe",
+        command_line="powershell.exe -EncodedCommand abc123",
+        raw={"rule": {"level": 10}, "session_secret": LEAKY_RAW_MARKER},
+    )
+
+
+def _incident_candidates() -> list[IncidentCandidate]:
+    """Create two candidates belonging to one incident.
+
+    Inputs:
+        None.
+
+    Outputs:
+        IncidentCandidate list.
+    """
+
+    first = IncidentCandidate(
+        id="CAND-20260610-001-aaa",
+        first_seen=BASE_TIME,
+        last_seen=BASE_TIME + timedelta(minutes=5),
+        alerts=[_incident_alert("alert-001"), _incident_alert("alert-002", minutes=5)],
+        primary_host="endpoint-01",
+        primary_user="alice",
+        src_ips=["10.0.1.10"],
+        dst_ips=["203.0.113.10"],
+        created_at=BASE_TIME,
+    )
+    second = IncidentCandidate(
+        id="CAND-20260610-002-bbb",
+        first_seen=BASE_TIME + timedelta(minutes=20),
+        last_seen=BASE_TIME + timedelta(minutes=25),
+        alerts=[
+            _incident_alert(
+                "alert-003",
+                hostname="fileserver-02",
+                minutes=20,
+                rule_name="Credential dumping detected",
+            )
+        ],
+        primary_host="fileserver-02",
+        primary_user="bob",
+        src_ips=["10.0.1.11"],
+        dst_ips=["198.51.100.9"],
+        created_at=BASE_TIME,
+    )
+    return [first, second]
+
+
+def _incident_triages(candidates: list[IncidentCandidate]) -> list[TriageResult]:
+    """Create triage results for incident candidates.
+
+    Inputs:
+        candidates: Candidates in the incident.
+
+    Outputs:
+        TriageResult list, one per candidate.
+    """
+
+    scores = [8, 9]
+    results = []
+    for candidate, score in zip(candidates, scores, strict=False):
+        results.append(
+            TriageResult(
+                id=f"triage-{candidate.id}",
+                target_id=candidate.id,
+                target_type="incident_candidate",
+                score=score,
+                fp_likelihood=FalsePositiveLikelihood.LOW,
+                classification="likely_true_positive_high_priority",
+                action=TriageAction.PAGE_NOW,
+                summary=f"Malicious activity on {candidate.primary_host}.",
+                iocs={"ips": ["203.0.113.10"], "hashes": ["deadbeef"]},
+                recommended_actions=["Isolate the host"],
+            )
+        )
+    return results
+
+
+def _incident(
+    candidates: list[IncidentCandidate] | None = None,
+    triages: list[TriageResult] | None = None,
+    *,
+    asset_context: dict[str, Any] | None = None,
+) -> Incident:
+    """Create an incident spanning the given candidates.
+
+    Inputs:
+        candidates: Candidates in the incident.
+        triages: Triage results for those candidates.
+        asset_context: Optional asset context for the primary host.
+
+    Outputs:
+        Incident object.
+    """
+
+    candidates = candidates if candidates is not None else _incident_candidates()
+    triages = triages if triages is not None else _incident_triages(candidates)
+    alert_ids = [alert.id for candidate in candidates for alert in candidate.alerts]
+    return Incident(
+        id="INC-20260610-001-abc123",
+        candidate_ids=[candidate.id for candidate in candidates],
+        alert_ids=alert_ids,
+        triage_result_ids=[triage.id for triage in triages],
+        first_seen=BASE_TIME,
+        last_seen=BASE_TIME + timedelta(minutes=25),
+        primary_host="endpoint-01",
+        primary_user="alice",
+        src_ips=["10.0.1.10", "10.0.1.11"],
+        dst_ips=["203.0.113.10", "198.51.100.9"],
+        max_score=max((triage.score for triage in triages), default=0),
+        asset_context=asset_context or {},
+        created_at=BASE_TIME,
+    )
+
+
+def _leaky_enrichments() -> list[EnrichmentResult]:
+    """Create enrichment results whose raw payloads must never leak.
+
+    Inputs:
+        None.
+
+    Outputs:
+        EnrichmentResult list.
+    """
+
+    return [
+        EnrichmentResult(
+            indicator="203.0.113.10",
+            indicator_type="ip",
+            provider="local",
+            summary="Public destination address.",
+            raw={"provider_response": LEAKY_ENRICHMENT_MARKER},
+            looked_up_at=BASE_TIME,
+        )
+    ]
+
+
+def test_incident_report_contains_all_seven_sections():
+    """A deterministic incident report must render all seven planned sections."""
+
+    candidates = _incident_candidates()
+    triages = _incident_triages(candidates)
+
+    report = MarkdownReportBuilder().build_incident_report(
+        _incident(candidates, triages),
+        candidates=candidates,
+        triage_results=triages,
+    )
+
+    assert report.startswith("# Incident Report: INC-20260610-001-abc123")
+    for heading in (
+        "## Executive Summary",
+        "## Timeline",
+        "## Affected Assets",
+        "## IOCs",
+        "## Attack Narrative",
+        "## Remediation",
+        "## Detection Gaps",
+    ):
+        assert heading in report
+    assert "Generated by AI_Augmented_SOC" in report
+
+
+def test_incident_report_aggregates_every_candidate():
+    """The report must aggregate alerts, assets, and scores across candidates."""
+
+    candidates = _incident_candidates()
+    triages = _incident_triages(candidates)
+
+    report = build_incident_report(
+        _incident(candidates, triages),
+        candidates=candidates,
+        triage_results=triages,
+    )
+
+    for expected in (
+        "CAND-20260610-001-aaa",
+        "CAND-20260610-002-bbb",
+        "alert-001",
+        "alert-002",
+        "alert-003",
+        "endpoint-01",
+        "fileserver-02",
+        "203.0.113.10",
+        "198.51.100.9",
+        "Credential dumping detected",
+    ):
+        assert expected in report
+    assert "9/10" in report
+    assert "2026-06-10T12:00:00+00:00" in report
+    assert "2026-06-10T12:25:00+00:00" in report
+
+
+def test_incident_report_includes_asset_context_when_present():
+    """Asset criticality must reach the report when the incident carries it."""
+
+    candidates = _incident_candidates()
+    triages = _incident_triages(candidates)
+    incident = _incident(
+        candidates,
+        triages,
+        asset_context={"criticality": "high", "owner": "payments-team"},
+    )
+
+    report = build_incident_report(incident, candidates=candidates, triage_results=triages)
+
+    assert "criticality" in report
+    assert "high" in report
+    assert "payments-team" in report
+
+
+def test_incident_report_without_narrative_client_is_labelled_templated():
+    """With no narrative client the report must declare itself templated."""
+
+    candidates = _incident_candidates()
+    triages = _incident_triages(candidates)
+
+    report = build_incident_report(
+        _incident(candidates, triages),
+        candidates=candidates,
+        triage_results=triages,
+    )
+
+    assert "## Report Provenance" in report
+    assert "templated" in report.lower()
+    assert "model-drafted" not in report.lower()
+
+
+def test_create_incident_report_leaves_generated_by_model_unset_when_templated():
+    """A templated report must never look model-drafted on the model object."""
+
+    candidates = _incident_candidates()
+    triages = _incident_triages(candidates)
+
+    report = create_incident_report(
+        _incident(candidates, triages),
+        candidates=candidates,
+        triage_results=triages,
+    )
+
+    assert isinstance(report, IncidentReport)
+    assert report.incident_id == "INC-20260610-001-abc123"
+    assert report.generated_by_model is None
+    assert "templated" in report.markdown.lower()
+
+
+def test_incident_report_includes_analyst_notes_when_supplied():
+    """Analyst notes are first-hand context and must appear in the report."""
+
+    candidates = _incident_candidates()
+    triages = _incident_triages(candidates)
+
+    report = build_incident_report(
+        _incident(candidates, triages),
+        candidates=candidates,
+        triage_results=triages,
+        analyst_notes="Confirmed with the asset owner that no change window was open.",
+    )
+
+    assert "## Analyst Notes" in report
+    assert "no change window was open" in report
+
+
+def test_incident_report_with_no_candidates_still_renders():
+    """An incident with no candidate detail must render, not raise."""
+
+    incident = Incident(id="INC-20260610-009-empty", first_seen=None, last_seen=None)
+
+    report = build_incident_report(incident, candidates=[], triage_results=[])
+
+    assert "# Incident Report: INC-20260610-009-empty" in report
+    assert "## Timeline" in report
+    assert "No alerts" in report
+    assert "unknown" in report.lower()
+
+
+def test_module_level_build_incident_report_matches_builder():
+    """The module-level function must mirror the builder method."""
+
+    candidates = _incident_candidates()
+    triages = _incident_triages(candidates)
+    incident = _incident(candidates, triages)
+
+    assert build_incident_report(
+        incident, candidates=candidates, triage_results=triages
+    ) == MarkdownReportBuilder().build_incident_report(
+        incident, candidates=candidates, triage_results=triages
+    )
+
+
+@dataclass(slots=True)
+class FakeNarrativeClient:
+    """Fake narrative client recording prompts and returning fixed text."""
+
+    response_text: str = ""
+    raise_error: Exception | None = None
+    calls: list[dict[str, object]] = field(default_factory=list)
+
+    def complete_text(
+        self,
+        prompt: str,
+        *,
+        system_prompt: str | None = None,
+        model: str | None = None,
+        temperature: float = 0.2,
+        max_tokens: int = 800,
+    ) -> str:
+        """Record a fake narrative call and return the configured response."""
+
+        self.calls.append({"prompt": prompt, "system_prompt": system_prompt, "model": model})
+        del temperature, max_tokens
+        if self.raise_error is not None:
+            raise self.raise_error
+        return self.response_text
+
+
+@dataclass(slots=True)
+class FakeSequenceNarrativeClient:
+    """Fake narrative client returning a scripted sequence of responses."""
+
+    responses: list[Any]
+    calls: int = 0
+
+    def complete_text(
+        self,
+        prompt: str,
+        *,
+        system_prompt: str | None = None,
+        model: str | None = None,
+        temperature: float = 0.2,
+        max_tokens: int = 800,
+    ) -> str:
+        """Return the next scripted response, repeating the last one."""
+
+        del prompt, system_prompt, model, temperature, max_tokens
+        index = min(self.calls, len(self.responses) - 1)
+        self.calls += 1
+        response = self.responses[index]
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+
+_VALID_NARRATIVE_JSON = (
+    '{"executive_summary": "Credential theft on endpoint-01 spread to fileserver-02.",'
+    ' "attack_narrative": "The operator ran encoded PowerShell, then dumped credentials.",'
+    ' "remediation": "Isolate both hosts and reset alice.",'
+    ' "detection_gaps": "No EDR coverage on fileserver-02."}'
+)
+
+
+def test_incident_report_with_narrative_client_is_model_drafted():
+    """A working narrative client must produce a labelled model-drafted report."""
+
+    candidates = _incident_candidates()
+    triages = _incident_triages(candidates)
+    client = FakeNarrativeClient(response_text=_VALID_NARRATIVE_JSON)
+    builder = MarkdownReportBuilder(client, model="vendor/model-x")
+
+    report = builder.build_incident_report(
+        _incident(candidates, triages),
+        candidates=candidates,
+        triage_results=triages,
+    )
+
+    assert "model-drafted" in report.lower()
+    assert "vendor/model-x" in report
+    assert REPORT_PROMPT_VERSION in report
+    assert "The operator ran encoded PowerShell" in report
+    assert "No EDR coverage on fileserver-02." in report
+    for heading in ("## Timeline", "## Affected Assets", "## IOCs", "## Detection Gaps"):
+        assert heading in report
+    assert "alert-003" in report
+
+
+def test_create_incident_report_sets_generated_by_model_for_a_real_draft():
+    """generated_by_model must be set only when a model actually drafted prose."""
+
+    candidates = _incident_candidates()
+    triages = _incident_triages(candidates)
+    client = FakeNarrativeClient(response_text=_VALID_NARRATIVE_JSON)
+
+    report = create_incident_report(
+        _incident(candidates, triages),
+        candidates=candidates,
+        triage_results=triages,
+        narrative_client=client,
+        model="vendor/model-x",
+    )
+
+    assert report.generated_by_model == "vendor/model-x"
+    assert REPORT_PROMPT_VERSION in report.markdown
+
+
+def test_incident_report_falls_back_to_templated_when_the_client_fails():
+    """A transport failure must degrade to a templated report, labelled as such."""
+
+    candidates = _incident_candidates()
+    triages = _incident_triages(candidates)
+    client = FakeNarrativeClient(raise_error=OpenRouterError("rate limited"))
+
+    report = create_incident_report(
+        _incident(candidates, triages),
+        candidates=candidates,
+        triage_results=triages,
+        narrative_client=client,
+    )
+
+    assert report.generated_by_model is None
+    assert "templated" in report.markdown.lower()
+    assert "model-drafted" not in report.markdown.lower()
+    assert len(client.calls) == 1
+
+
+def test_incident_narrative_retries_one_unusable_response():
+    """One unusable narrative response deserves a retry, not an instant fallback."""
+
+    candidates = _incident_candidates()
+    triages = _incident_triages(candidates)
+    client = FakeSequenceNarrativeClient(responses=["not json at all", _VALID_NARRATIVE_JSON])
+
+    report = build_incident_report(
+        _incident(candidates, triages),
+        candidates=candidates,
+        triage_results=triages,
+        narrative_client=client,
+    )
+
+    assert client.calls == 2
+    assert "model-drafted" in report.lower()
+
+
+def test_incident_narrative_falls_back_when_the_retry_is_also_unusable():
+    """Two unusable responses must end in a templated report."""
+
+    candidates = _incident_candidates()
+    triages = _incident_triages(candidates)
+    client = FakeSequenceNarrativeClient(responses=["not json", "still not json"])
+
+    report = build_incident_report(
+        _incident(candidates, triages),
+        candidates=candidates,
+        triage_results=triages,
+        narrative_client=client,
+    )
+
+    assert client.calls == 2
+    assert "templated" in report.lower()
+    assert "model-drafted" not in report.lower()
+
+
+def test_incident_narrative_does_not_retry_transport_failures():
+    """The client already retries transport failures; doubling the wait is wrong."""
+
+    candidates = _incident_candidates()
+    triages = _incident_triages(candidates)
+    client = FakeSequenceNarrativeClient(responses=[OpenRouterError("rate limited")])
+
+    report = build_incident_report(
+        _incident(candidates, triages),
+        candidates=candidates,
+        triage_results=triages,
+        narrative_client=client,
+    )
+
+    assert client.calls == 1
+    assert "templated" in report.lower()
+
+
+def test_narrative_prompt_never_contains_raw_alert_or_enrichment_payloads():
+    """Raw source and provider payloads must not reach a third party."""
+
+    candidates = _incident_candidates()
+    triages = _incident_triages(candidates)
+    client = FakeNarrativeClient(response_text=_VALID_NARRATIVE_JSON)
+
+    build_incident_report(
+        _incident(candidates, triages),
+        candidates=candidates,
+        triage_results=triages,
+        enrichments=_leaky_enrichments(),
+        narrative_client=client,
+        analyst_notes="Owner confirmed no change window.",
+    )
+
+    assert len(client.calls) == 1
+    prompt = str(client.calls[0]["prompt"])
+    assert LEAKY_RAW_MARKER not in prompt
+    assert LEAKY_ENRICHMENT_MARKER not in prompt
+    assert "session_secret" not in prompt
+    assert "provider_response" not in prompt
+    assert "Suspicious PowerShell execution" in prompt
+    assert "Owner confirmed no change window." in prompt
+
+
+def test_report_system_prompt_requires_sections_grounding_and_honesty():
+    """The prompt must demand the seven sections, grounding, and admitted gaps."""
+
+    lowered = REPORT_SYSTEM_PROMPT.lower()
+
+    for section in (
+        "executive summary",
+        "timeline",
+        "affected assets",
+        "iocs",
+        "attack narrative",
+        "remediation",
+        "detection gaps",
+    ):
+        assert section in lowered
+    assert "ground" in lowered
+    assert "insufficient" in lowered
+    assert "invent" in lowered

@@ -34,6 +34,44 @@ class NotificationError(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
+class NotificationAttachment:
+    """One text file to deliver alongside a notification body.
+
+    Attributes:
+        filename: File name the recipient sees, such as `INC-20260610-001.md`.
+        content: Text content of the file.
+        maintype: MIME main type. Defaults to text.
+        subtype: MIME subtype. Defaults to markdown, matching this project's
+            reports.
+    """
+
+    filename: str
+    content: str
+    maintype: str = "text"
+    subtype: str = "markdown"
+
+    def __post_init__(self) -> None:
+        """Validate the attachment.
+
+        Inputs:
+            None. Uses this object's fields.
+
+        Outputs:
+            None.
+
+        Raises:
+            NotificationError: If the filename or content is empty.
+        """
+
+        if self.filename.strip() == "":
+            raise NotificationError("attachment filename is required")
+        if self.content.strip() == "":
+            raise NotificationError("attachment content is required")
+        if self.maintype.strip() == "" or self.subtype.strip() == "":
+            raise NotificationError("attachment MIME type is required")
+
+
+@dataclass(frozen=True, slots=True)
 class NotificationMessage:
     """Message to send through one or more notification channels.
 
@@ -42,12 +80,16 @@ class NotificationMessage:
         body: Full message body.
         severity: Optional severity label.
         metadata: Optional structured metadata.
+        attachments: Optional files to deliver alongside the body. An attachment
+            never replaces the body: a client that cannot render the file must
+            still show the summary.
     """
 
     subject: str
     body: str
     severity: str = "info"
     metadata: JsonDict | None = None
+    attachments: tuple[NotificationAttachment, ...] = ()
 
     def __post_init__(self) -> None:
         """Validate notification message.
@@ -253,6 +295,11 @@ class EmailNotifier:
     def _build_email_message(self, message: NotificationMessage) -> EmailMessage:
         """Build EmailMessage object.
 
+        The body is always set first and attachments are only added afterwards,
+        so an attached report is delivered *in addition to* the summary rather
+        than instead of it. With no attachments the message stays a single-part
+        text/plain mail, which is the behaviour every existing caller expects.
+
         Inputs:
             message: NotificationMessage.
 
@@ -265,6 +312,13 @@ class EmailNotifier:
         email_message["From"] = self.config.email_from
         email_message["To"] = self.config.email_to
         email_message.set_content(message.body)
+        for attachment in message.attachments or ():
+            email_message.add_attachment(
+                attachment.content.encode("utf-8"),
+                maintype=attachment.maintype,
+                subtype=attachment.subtype,
+                filename=attachment.filename,
+            )
         return email_message
 
 

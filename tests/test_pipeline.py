@@ -198,9 +198,11 @@ class FakeStore:
     triage_results: list[TriageResult] = field(default_factory=list)
     routing_decisions: list[RoutingDecision] = field(default_factory=list)
     queued_for_review: list[TriageResult] = field(default_factory=list)
+    incidents: list[Any] = field(default_factory=list)
     fail_on_initialize: bool = False
     fail_on_save_alert: bool = False
     fail_on_enqueue: bool = False
+    fail_on_save_incident: bool = False
 
     def initialize(self) -> None:
         """Record initialization."""
@@ -235,6 +237,13 @@ class FakeStore:
         """Record routing save."""
 
         self.routing_decisions.append(decision)
+
+    def save_incident(self, incident: Any) -> None:
+        """Record incident save."""
+
+        if self.fail_on_save_incident:
+            raise RuntimeError("save incident failed")
+        self.incidents.append(incident)
 
     def enqueue_for_review(self, result: TriageResult) -> None:
         """Record review-queue enqueue."""
@@ -372,7 +381,28 @@ class FakeReporter:
     """Fake reporter that returns deterministic Markdown."""
 
     calls: list[str] = field(default_factory=list)
+    incident_calls: list[str] = field(default_factory=list)
     received_enrichments: list[list[EnrichmentResult]] = field(default_factory=list)
+
+    def build_incident_report(
+        self,
+        incident: Any,
+        *,
+        candidates: list[IncidentCandidate],
+        triage_results: list[TriageResult],
+        routing_decisions: list[RoutingDecision] | None = None,
+        enrichments: list[EnrichmentResult] | None = None,
+        analyst_notes: str | None = None,
+        title: str | None = None,
+    ) -> str:
+        """Return deterministic incident Markdown.
+
+        Recorded separately from candidate reports so assertions about
+        candidate-level reporting stay precise.
+        """
+
+        self.incident_calls.append(incident.id)
+        return f"# Incident {incident.id}"
 
     def build_candidate_report(
         self,
@@ -957,3 +987,106 @@ def test_pipeline_survives_a_failing_asset_lookup():
 
     assert result.item_results
     assert any("asset" in error for error in result.errors)
+
+
+def test_pipeline_promotes_high_scoring_candidates_into_incidents(tmp_path):
+    """A paged candidate should become an incident an analyst can open."""
+
+    store = FakeStore()
+    pipeline = SOCPipeline(
+        config=PipelineConfig(output_dir=tmp_path, write_reports=False),
+        store=store,
+        router=TriageRouter(RoutingConfig(page_threshold=1, queue_threshold=1)),
+    )
+
+    result = pipeline.run_events([_raw_event()])
+
+    assert len(result.incidents) == 1
+    assert result.incidents[0].candidate_ids == [result.item_results[0].candidate.id]
+    assert result.to_summary()["incidents"] == 1
+
+
+def test_pipeline_does_not_promote_low_scoring_candidates(tmp_path):
+    """Promoting everything would make the incident tier meaningless."""
+
+    pipeline = SOCPipeline(
+        config=PipelineConfig(output_dir=tmp_path, write_reports=False),
+        store=FakeStore(),
+        router=TriageRouter(RoutingConfig(page_threshold=10, queue_threshold=10)),
+        triage_engine=FakeTriageEngine(
+            triage_result=TriageResult(
+                id="triage-low",
+                target_id="candidate-001",
+                target_type="incident_candidate",
+                score=2,
+                fp_likelihood=FalsePositiveLikelihood.HIGH,
+                classification="likely_false_positive",
+                action=TriageAction.MARK_LIKELY_BENIGN,
+                summary="Benign",
+            )
+        ),
+    )
+
+    result = pipeline.run_events([_raw_event()])
+
+    assert result.incidents == []
+    assert result.to_summary()["incidents"] == 0
+
+
+def test_pipeline_persists_promoted_incidents(tmp_path):
+    """An incident that is not stored cannot be worked later."""
+
+    store = FakeStore()
+    pipeline = SOCPipeline(
+        config=PipelineConfig(output_dir=tmp_path, write_reports=False),
+        store=store,
+        router=TriageRouter(RoutingConfig(page_threshold=1, queue_threshold=1)),
+    )
+
+    result = pipeline.run_events([_raw_event()])
+
+    assert [incident.id for incident in store.incidents] == [result.incidents[0].id]
+
+
+def test_pipeline_writes_an_incident_report(tmp_path):
+    """The incident tier needs its own report, not just candidate reports."""
+
+    pipeline = SOCPipeline(
+        config=PipelineConfig(output_dir=tmp_path, write_reports=True),
+        store=FakeStore(),
+        router=TriageRouter(RoutingConfig(page_threshold=1, queue_threshold=1)),
+    )
+
+    result = pipeline.run_events([_raw_event()])
+
+    report_path = tmp_path / f"{result.incidents[0].id}.md"
+    assert report_path.exists()
+    assert result.incidents[0].id in report_path.read_text(encoding="utf-8")
+
+
+def test_pipeline_can_disable_incident_promotion(tmp_path):
+    """Environments that only want candidates must be able to say so."""
+
+    pipeline = SOCPipeline(
+        config=PipelineConfig(output_dir=tmp_path, write_reports=False, promote_incidents=False),
+        store=FakeStore(),
+        router=TriageRouter(RoutingConfig(page_threshold=1, queue_threshold=1)),
+    )
+
+    assert pipeline.run_events([_raw_event()]).incidents == []
+
+
+def test_pipeline_records_a_promotion_failure_without_losing_the_run(tmp_path):
+    """A failure in the incident tier must not discard processed candidates."""
+
+    store = FakeStore(fail_on_save_incident=True)
+    pipeline = SOCPipeline(
+        config=PipelineConfig(output_dir=tmp_path, write_reports=False),
+        store=store,
+        router=TriageRouter(RoutingConfig(page_threshold=1, queue_threshold=1)),
+    )
+
+    result = pipeline.run_events([_raw_event()])
+
+    assert result.item_results
+    assert any("incident" in error for error in result.errors)

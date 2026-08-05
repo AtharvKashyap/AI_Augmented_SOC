@@ -19,6 +19,7 @@ from typing import Any, Protocol
 from soc.clustering import AlertClusterer
 from soc.dedup import DeduplicationService
 from soc.enrichment import LocalEnricher
+from soc.incidents import Incident, IncidentPromoter
 from soc.models import (
     Alert,
     EnrichmentResult,
@@ -85,6 +86,9 @@ class PipelineConfig:
             dispatcher.
         initialize_store: Whether to initialize the store before processing.
         deduplicate: Whether to skip previously seen raw events and alerts.
+        promote_incidents: Whether qualifying candidates are promoted into
+            incidents. Environments that only want the candidate tier can
+            disable it.
         fail_fast: Whether to raise on the first processing error.
     """
 
@@ -93,6 +97,7 @@ class PipelineConfig:
     send_notifications: bool = False
     initialize_store: bool = True
     deduplicate: bool = True
+    promote_incidents: bool = True
     fail_fast: bool = False
 
     def __post_init__(self) -> None:
@@ -152,6 +157,7 @@ class PipelineRunResult:
     errors: list[str]
     started_at: Any
     finished_at: Any
+    incidents: list[Incident] = field(default_factory=list)
 
     @property
     def report_paths(self) -> list[Path]:
@@ -183,6 +189,7 @@ class PipelineRunResult:
             "skipped_raw_events": len(self.skipped_raw_events),
             "skipped_alerts": len(self.skipped_alerts),
             "candidates": len(self.candidates),
+            "incidents": len(self.incidents),
             "reports": len(self.report_paths),
             "notifications": sum(len(item.notifications) for item in self.item_results),
             "errors": list(self.errors),
@@ -207,6 +214,7 @@ class SOCPipeline:
         asset_inventory: Any | None = None,
         triage_engine: TriageEngine | None = None,
         router: TriageRouter | None = None,
+        incident_promoter: IncidentPromoter | None = None,
         reporter: MarkdownReportBuilder | None = None,
         notifier: NotificationDispatcher | None = None,
     ) -> None:
@@ -225,6 +233,8 @@ class SOCPipeline:
                 context. Omitted means no asset context, which is normal.
             triage_engine: Optional TriageEngine.
             router: Optional TriageRouter.
+            incident_promoter: Optional IncidentPromoter deciding what becomes an
+                incident.
             reporter: Optional MarkdownReportBuilder.
             notifier: Optional NotificationDispatcher.
 
@@ -242,6 +252,7 @@ class SOCPipeline:
         self.asset_inventory = asset_inventory
         self.triage_engine = triage_engine or TriageEngine()
         self.router = router or TriageRouter()
+        self.incident_promoter = incident_promoter or IncidentPromoter()
         self.reporter = reporter or MarkdownReportBuilder()
         self.notifier = notifier or NotificationDispatcher(dry_run=True)
 
@@ -337,7 +348,10 @@ class SOCPipeline:
             if item is not None:
                 item_results.append(item)
 
+        incidents = self._promote_incidents(item_results, errors)
+
         return PipelineRunResult(
+            incidents=incidents,
             raw_events=raw_events,
             normalized_alerts=normalized_alerts,
             accepted_alerts=accepted_alerts,
@@ -703,6 +717,102 @@ class SOCPipeline:
             self.store.save_routing_decision(routing)
         except Exception as exc:
             self._handle_error(errors, f"save routing failed for {routing.id}: {exc}")
+
+    def _promote_incidents(
+        self,
+        item_results: list[PipelineItemResult],
+        errors: list[str],
+    ) -> list[Incident]:
+        """Promote qualifying candidates into incidents, persist and report them.
+
+        The incident tier is deliberately narrower than the candidate tier: only
+        candidates clearing the promotion bar become incidents, so an incident
+        still means something to an analyst. Failures here are recorded rather
+        than raised, because losing already-processed candidates to a problem in
+        a later stage would be a worse outcome than a missing incident.
+
+        Inputs:
+            item_results: Processed candidate results.
+            errors: Mutable error list.
+
+        Outputs:
+            Promoted incidents.
+        """
+
+        if not self.config.promote_incidents or not item_results:
+            return []
+
+        try:
+            incidents = self.incident_promoter.promote(
+                [(item.candidate, item.triage) for item in item_results],
+                routing_decisions={item.candidate.id: item.routing for item in item_results},
+            )
+        except Exception as exc:
+            self._handle_error(errors, f"incident promotion failed: {exc}")
+            return []
+
+        for incident in incidents:
+            self._save_incident(incident, errors)
+            self._write_incident_report(incident, item_results, errors)
+        return incidents
+
+    def _save_incident(self, incident: Incident, errors: list[str]) -> None:
+        """Persist one incident when the store supports it.
+
+        Inputs:
+            incident: Incident to save.
+            errors: Mutable error list.
+
+        Outputs:
+            None.
+        """
+
+        if self.store is None:
+            return
+        save = getattr(self.store, "save_incident", None)
+        if save is None:
+            return
+        try:
+            save(incident)
+        except Exception as exc:
+            self._handle_error(errors, f"save incident failed for {incident.id}: {exc}")
+
+    def _write_incident_report(
+        self,
+        incident: Incident,
+        item_results: list[PipelineItemResult],
+        errors: list[str],
+    ) -> None:
+        """Write the Markdown report for one incident.
+
+        Inputs:
+            incident: Incident to report on.
+            item_results: Processed candidate results, used to gather context.
+            errors: Mutable error list.
+
+        Outputs:
+            None.
+        """
+
+        if not self.config.write_reports:
+            return
+
+        members = [item for item in item_results if item.candidate.id in set(incident.candidate_ids)]
+        enrichments: list[EnrichmentResult] = []
+        for item in members:
+            enrichments.extend(item.enrichments)
+
+        try:
+            report_text = self.reporter.build_incident_report(
+                incident,
+                candidates=[item.candidate for item in members],
+                triage_results=[item.triage for item in members],
+                routing_decisions=[item.routing for item in members],
+                enrichments=enrichments,
+            )
+            write_report_file(report_text, self.config.output_dir / f"{incident.id}.md")
+        except Exception as exc:
+            self._handle_error(errors, f"incident report failed for {incident.id}: {exc}")
 
     def _attach_asset_context(self, candidate: IncidentCandidate, errors: list[str]) -> None:
         """Attach inventory context for the candidate's primary asset.

@@ -65,7 +65,7 @@ jobs:
 
       - name: Run Ruff linting
         run: |
-          ruff check soc tests run_pipeline.py run_review.py run_eval.py
+          ruff check soc tests run_pipeline.py run_review.py run_eval.py run_report.py
 
       - name: Run unit tests
         run: |

@@ -29,6 +29,7 @@ from soc.notifier import (
     DryRunNotifier,
     EmailConfig,
     EmailNotifier,
+    NotificationAttachment,
     NotificationDispatcher,
     NotificationError,
     NotificationMessage,
@@ -644,3 +645,77 @@ def test_triage_notification_names_model_when_llm_scored():
     assert "vendor/model-x" in message.body
     assert message.metadata["analysis_source"] == "llm"
     assert message.metadata["model"] == "vendor/model-x"
+
+
+def test_notification_attachment_rejects_empty_filename_or_content():
+    """An attachment with no filename or no content is a configuration error."""
+
+    with pytest.raises(NotificationError, match="filename"):
+        NotificationAttachment(filename="  ", content="# Report")
+
+    with pytest.raises(NotificationError, match="content"):
+        NotificationAttachment(filename="report.md", content="")
+
+
+def test_email_notifier_attaches_markdown_and_keeps_body_summary():
+    """A Markdown attachment must be text/markdown and must not replace the body.
+
+    A mail client that cannot render the attachment still has to show the
+    summary, so the body is asserted independently of the attached file.
+    """
+
+    FakeSMTP.instances.clear()
+    config = EmailConfig(
+        enabled=True,
+        smtp_host="smtp.example.com",
+        email_from="soc@example.com",
+        email_to="analyst@example.com",
+        use_tls=False,
+    )
+    notifier = EmailNotifier(config, smtp_factory=FakeSMTP)
+    message = NotificationMessage(
+        subject="SOC incident report",
+        body="Investigate candidate-001",
+        attachments=(
+            NotificationAttachment(
+                filename="INC-20260610-001.md",
+                content="# Incident Report\n\nTemplated narrative.\n",
+            ),
+        ),
+    )
+
+    result = notifier.send(message)
+
+    assert result.success is True
+    email_message = FakeSMTP.instances[0].sent_messages[0]
+    assert email_message.is_multipart() is True
+    body_part = email_message.get_body(preferencelist=("plain",))
+    assert body_part is not None
+    assert "Investigate candidate-001" in body_part.get_content()
+    attachments = list(email_message.iter_attachments())
+    assert len(attachments) == 1
+    assert attachments[0].get_content_type() == "text/markdown"
+    assert attachments[0].get_filename() == "INC-20260610-001.md"
+    assert "Templated narrative." in attachments[0].get_content()
+
+
+def test_email_notifier_without_attachments_stays_single_part():
+    """Existing no-attachment behaviour must be unchanged: a plain text body."""
+
+    FakeSMTP.instances.clear()
+    config = EmailConfig(
+        enabled=True,
+        smtp_host="smtp.example.com",
+        email_from="soc@example.com",
+        email_to="analyst@example.com",
+        use_tls=False,
+    )
+    notifier = EmailNotifier(config, smtp_factory=FakeSMTP)
+
+    notifier.send(_message())
+
+    email_message = FakeSMTP.instances[0].sent_messages[0]
+    assert email_message.is_multipart() is False
+    assert email_message.get_content_type() == "text/plain"
+    assert "Investigate candidate-001" in email_message.get_content()
+    assert list(email_message.iter_attachments()) == []

@@ -12,7 +12,7 @@ pytest tests/ -v                              # full suite
 pytest tests/test_pipeline.py -v              # one module
 pytest tests/test_pipeline.py::test_name -v   # one test
 
-ruff check soc tests run_pipeline.py run_review.py run_eval.py   # exactly what CI lints
+ruff check soc tests run_pipeline.py run_review.py run_eval.py run_report.py   # exactly what CI lints
 ```
 
 Replay smoke test (this exact command is a CI step — keep it working):
@@ -52,6 +52,10 @@ python3 run_review.py verdict <id> --too-high --score 2 --notes "known backup jo
 python3 run_review.py export --output verdicts.json    # raw verdict records
 python3 run_review.py promote --labels labels.json     # verdicts -> loadable eval labels
 
+python3 run_report.py list                      # promoted incidents, newest first
+python3 run_report.py show <incident-id>        # the incident and what it was built from
+python3 run_report.py generate <incident-id> --output report.md [--no-llm] [--email]
+
 python3 run_eval.py --pretty                    # local triage vs the labeled set
 python3 run_eval.py --llm                       # model-assisted triage (needs a key)
 python3 run_eval.py --fail-under-thresholds     # gate a build on triage quality
@@ -90,6 +94,19 @@ Things that only become clear after reading several files:
 - **The CLI initializes the database before the first cycle.** The pipeline also initializes its store when it processes events, but the read cursor is consulted *before* that, so the schema must already exist. This bug passed 324 unit tests because every one of them used a fake store; only an end-to-end test with real components caught it. Prefer at least one real-component test per integration seam.
 - **Never bind a filesystem identifier to a SQLite INTEGER column.** Windows `st_ino` is a 128-bit file ID: binding it raises `OverflowError`, and a numeric-looking *string* in a column with INTEGER affinity is silently converted to a float, losing precision and quietly breaking rotation detection. `IngestCursor.file_identity` is therefore one deliberately non-numeric `"<device>-<inode>"` TEXT token, since only equality is ever needed. This was a Windows-only failure that all local runs and both non-Windows CI jobs passed.
 - **`SQLiteStore.initialize()` migrates before it creates.** `CREATE TABLE IF NOT EXISTS` leaves older databases on their original schema, so `_apply_column_migrations` runs first and `ALTER TABLE`s any column listed in `_ADDED_COLUMNS` that is missing. Order matters: indexes in `_SCHEMA_SQL` may reference columns that only exist after migration. When you add a column to an existing table, add it to both places.
+
+### The incident tier
+
+`CAND-*` is a cluster the system built; `INC-*` is something a human would open a case for. `soc/incidents.py` decides which candidates cross that line, and the distinction is the point — promoting every candidate would make the incident tier a second name for the candidate tier.
+
+- **Promotion follows the routing decision, not the triage suggestion.** `TriageResult.action` is only what triage proposed; the router is what actually decided. `IncidentPromoter.promote` takes `routing_decisions` and prefers them, so tuning `RoutingConfig` thresholds is visible in the incident tier. Reading the suggestion instead would recreate the dead-threshold bug that was removed from the router in Phase 2.
+- Candidates sharing a host, user, agent or address inside `time_window_minutes` (default 2h) **merge into one incident**, so an analyst does not investigate the same compromise twice from the endpoint and network sides.
+- Incident IDs are content-addressed (`INC-YYYYMMDD-NNN-<hash>`), so a rerun updates rather than duplicating.
+- **`incident_candidate_links` is named that deliberately.** `incident_candidates` already exists and stores `IncidentCandidate` rows; reusing the name made `CREATE TABLE IF NOT EXISTS` a silent no-op against the wrong schema. Check for an existing table before adding one.
+
+### Report provenance
+
+Incident reports carry a `## Report Provenance` section stating whether the narrative was model-drafted or templated, and `IncidentReport.generated_by_model` is set **only** for a genuine model draft. Timeline, Affected Assets, IOCs, Triage Decisions and Enrichment Summary are always rendered deterministically from stored data, so a report is produced with no API key — the deterministic renderer is permanent, not a stopgap. A partial model response is treated as unusable by design: a report labelled model-drafted is model-drafted throughout. The report prompt reuses the triage context allowlist rather than adding a second filtering scheme, so raw alert payloads and raw enrichment payloads never reach the model.
 
 ### External enrichment
 

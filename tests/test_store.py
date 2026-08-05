@@ -831,3 +831,78 @@ def test_delete_expired_enrichment_cache_reports_how_many_it_removed(store):
 
     assert store.delete_expired_enrichment_cache() == 1
     assert store.get_cached_enrichment("virustotal", "ip", "203.0.113.11") == {"v": 1}
+
+
+def _incident(incident_id: str = "INC-20260805-001-abc123"):
+    """Build an incident for persistence tests."""
+
+    from soc.incidents import Incident
+
+    moment = datetime(2026, 8, 5, 12, 0, tzinfo=UTC)
+    return Incident(
+        id=incident_id,
+        candidate_ids=["CAND-1", "CAND-2"],
+        alert_ids=["alert-1", "alert-2"],
+        triage_result_ids=["triage-1"],
+        first_seen=moment,
+        last_seen=moment,
+        primary_host="endpoint-01",
+        primary_user="alice",
+        src_ips=["10.0.1.10"],
+        dst_ips=["8.8.8.8"],
+        max_score=9,
+        asset_context={"criticality": "critical"},
+    )
+
+
+def test_save_incident_persists_it_with_its_candidate_mapping(store):
+    """An incident must be recoverable along with what it was built from."""
+
+    incident = _incident()
+
+    store.save_incident(incident)
+    stored = store.get_incident(incident.id)
+
+    assert stored is not None
+    assert stored["primary_host"] == "endpoint-01"
+    assert stored["max_score"] == 9
+    assert sorted(store.list_incident_candidate_ids(incident.id)) == ["CAND-1", "CAND-2"]
+
+
+def test_saving_an_incident_twice_does_not_duplicate_its_mapping(store):
+    """Reruns produce the same incident ID, so saving must be idempotent."""
+
+    incident = _incident()
+
+    store.save_incident(incident)
+    store.save_incident(incident)
+
+    assert sorted(store.list_incident_candidate_ids(incident.id)) == ["CAND-1", "CAND-2"]
+    assert len(store.list_recent_incidents()) == 1
+
+
+def test_get_incident_returns_none_when_absent(store):
+    """A missing incident is not an error."""
+
+    assert store.get_incident("INC-nope") is None
+
+
+def test_list_recent_incidents_is_newest_first(store):
+    """Analysts work the newest incidents first."""
+
+    for index in range(3):
+        store.save_incident(_incident(f"INC-20260805-00{index}-aaa"))
+
+    listed = store.list_recent_incidents()
+
+    assert len(listed) == 3
+    assert listed[0]["id"] != listed[-1]["id"]
+
+
+def test_list_recent_incidents_honours_a_limit(store):
+    """A long incident list must be pageable."""
+
+    for index in range(5):
+        store.save_incident(_incident(f"INC-20260805-00{index}-aaa"))
+
+    assert len(store.list_recent_incidents(limit=2)) == 2
