@@ -338,6 +338,7 @@ class IncidentCandidate:
     dst_ips: list[str] = field(default_factory=list)
     related_events: list[RawEvent] = field(default_factory=list)
     enrichments: list[EnrichmentResult] = field(default_factory=list)
+    asset_context: JsonDict = field(default_factory=dict)
     created_at: datetime = field(default_factory=utc_now)
 
     def to_dict(self) -> JsonDict:

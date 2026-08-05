@@ -839,3 +839,121 @@ def test_pipeline_records_an_enqueue_failure_without_losing_the_run():
 
     assert result.item_results
     assert any("review queue" in error for error in result.errors)
+
+
+@dataclass(slots=True)
+class FakeIntelEnricher:
+    """Fake external-intel enricher."""
+
+    results: list[EnrichmentResult] = field(default_factory=list)
+    calls: list[str] = field(default_factory=list)
+    fail: bool = False
+
+    def enrich_candidate(self, candidate: IncidentCandidate) -> list[EnrichmentResult]:
+        """Record the call and return configured results."""
+
+        self.calls.append(candidate.id)
+        if self.fail:
+            raise RuntimeError("provider unavailable")
+        return list(self.results)
+
+
+@dataclass(slots=True)
+class FakeInventory:
+    """Fake asset inventory returning one canned context."""
+
+    context: Any = None
+    calls: list[tuple[str | None, str | None]] = field(default_factory=list)
+
+    def lookup(self, hostname: str | None = None, ip: str | None = None) -> Any:
+        """Record the lookup and return the canned context."""
+
+        self.calls.append((hostname, ip))
+        return self.context
+
+
+def test_pipeline_merges_external_intel_with_local_enrichment():
+    """External reputation must add to local enrichment, not replace it."""
+
+    intel = FakeIntelEnricher(results=[_enrichment()])
+    pipeline = SOCPipeline(
+        config=PipelineConfig(output_dir=Path("unused"), write_reports=False),
+        intel_enricher=intel,
+    )
+
+    result = pipeline.run_events([_raw_event()])
+
+    assert intel.calls
+    providers = {item.provider for item in result.item_results[0].enrichments}
+    assert "local" in providers
+    assert len(result.item_results[0].enrichments) > 1
+
+
+def test_pipeline_survives_a_failing_intel_enricher():
+    """A provider outage must cost the lookup, not the run."""
+
+    pipeline = SOCPipeline(
+        config=PipelineConfig(output_dir=Path("unused"), write_reports=False),
+        intel_enricher=FakeIntelEnricher(fail=True),
+    )
+
+    result = pipeline.run_events([_raw_event()])
+
+    assert result.item_results
+    assert result.item_results[0].enrichments
+    assert any("intel" in error for error in result.errors)
+
+
+def test_pipeline_attaches_asset_context_to_candidates():
+    """Asset criticality must reach triage, or it cannot influence scoring."""
+
+    class _Context:
+        """Minimal asset context stand-in."""
+
+        def to_dict(self) -> dict[str, Any]:
+            """Return the context as a dictionary."""
+
+            return {"hostname": "endpoint-01", "criticality": "critical"}
+
+    inventory = FakeInventory(context=_Context())
+    pipeline = SOCPipeline(
+        config=PipelineConfig(output_dir=Path("unused"), write_reports=False),
+        asset_inventory=inventory,
+    )
+
+    result = pipeline.run_events([_raw_event()])
+
+    assert inventory.calls
+    assert result.item_results[0].candidate.asset_context["criticality"] == "critical"
+
+
+def test_pipeline_leaves_asset_context_empty_without_an_inventory():
+    """No inventory configured is normal and must not break anything."""
+
+    pipeline = SOCPipeline(config=PipelineConfig(output_dir=Path("unused"), write_reports=False))
+
+    result = pipeline.run_events([_raw_event()])
+
+    assert result.item_results[0].candidate.asset_context == {}
+
+
+def test_pipeline_survives_a_failing_asset_lookup():
+    """A broken inventory must not lose the alert."""
+
+    class _Broken:
+        """Inventory whose lookups fail."""
+
+        def lookup(self, hostname: str | None = None, ip: str | None = None) -> Any:
+            """Always fail."""
+
+            raise RuntimeError("inventory unreadable")
+
+    pipeline = SOCPipeline(
+        config=PipelineConfig(output_dir=Path("unused"), write_reports=False),
+        asset_inventory=_Broken(),
+    )
+
+    result = pipeline.run_events([_raw_event()])
+
+    assert result.item_results
+    assert any("asset" in error for error in result.errors)

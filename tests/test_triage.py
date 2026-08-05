@@ -37,6 +37,7 @@ from soc.triage import (
     TriageEngine,
     TriageError,
     build_alert_triage_payload,
+    build_candidate_context,
     build_candidate_triage_payload,
     build_triage_prompt,
     local_triage_alert,
@@ -834,3 +835,32 @@ def test_high_risk_enrichment_still_boosts_the_score():
         ),
         [],
     )
+
+
+def test_candidate_context_includes_asset_context():
+    """Asset criticality is often the difference between queueing and paging.
+
+    Triage cannot distinguish a developer laptop from a domain controller without
+    it, so it has to reach the model.
+    """
+
+    candidate = _candidate()
+    candidate.asset_context = {
+        "hostname": "dc-01",
+        "criticality": "critical",
+        "internet_facing": False,
+        "owner": "platform",
+    }
+
+    context = build_candidate_context(candidate)
+
+    assert context["asset_context"]["criticality"] == "critical"
+    assert context["asset_context"]["hostname"] == "dc-01"
+
+
+def test_candidate_context_without_asset_context_is_still_valid():
+    """No inventory configured must not break context building."""
+
+    context = build_candidate_context(_candidate())
+
+    assert context["asset_context"] in (None, {})
