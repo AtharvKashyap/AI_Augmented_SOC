@@ -17,7 +17,10 @@ from soc.shodan_client import (
 )
 from soc.threat_intel import IntelLookup, ThreatIntelEnricher
 
-API_KEY = "shodan-secret-key-abc123"
+# Deliberately low-entropy and self-describing. A random-looking value here
+# trips secret scanners on every commit, and this sentinel only needs to be
+# distinctive enough to assert it never appears in an error or log line.
+FAKE_KEY_SENTINEL = "fake-key-do-not-report"
 
 
 class FakeHTTPResponse:
@@ -127,7 +130,7 @@ def _config(**overrides: Any) -> ShodanConfig:
         ShodanConfig instance.
     """
 
-    values: dict[str, Any] = {"api_key": API_KEY, "timeout_seconds": 5, "retry_backoff_seconds": 0.0}
+    values: dict[str, Any] = {"api_key": FAKE_KEY_SENTINEL, "timeout_seconds": 5, "retry_backoff_seconds": 0.0}
     values.update(overrides)
     return ShodanConfig(**values)
 
@@ -161,7 +164,7 @@ def test_lookup_builds_host_url_with_key_query_parameter() -> None:
     assert parsed.scheme == "https"
     assert parsed.netloc == "api.shodan.io"
     assert parsed.path == "/shodan/host/203.0.113.10"
-    assert urllib.parse.parse_qs(parsed.query) == {"key": [API_KEY]}
+    assert urllib.parse.parse_qs(parsed.query) == {"key": [FAKE_KEY_SENTINEL]}
     assert opener.timeouts == [5]
 
 
@@ -443,10 +446,10 @@ def test_api_key_never_appears_in_a_raised_exception(failure: Any) -> None:
         client.lookup("ip", "203.0.113.10")
 
     rendered = f"{excinfo.value}{excinfo.value.args}{excinfo.value!r}"
-    assert API_KEY not in rendered
+    assert FAKE_KEY_SENTINEL not in rendered
     cause = excinfo.value.__cause__
     if cause is not None:
-        assert API_KEY not in str(cause)
+        assert FAKE_KEY_SENTINEL not in str(cause)
 
 
 def test_api_key_never_appears_in_log_output(caplog: Any) -> None:
@@ -457,7 +460,7 @@ def test_api_key_never_appears_in_log_output(caplog: Any) -> None:
     with caplog.at_level("DEBUG"):
         client.lookup("ip", "203.0.113.10")
 
-    assert API_KEY not in caplog.text
+    assert FAKE_KEY_SENTINEL not in caplog.text
 
 
 def test_lookup_round_trips_through_payload() -> None:
@@ -540,11 +543,11 @@ def test_from_settings_is_defensive_about_missing_keys() -> None:
     class BareSettings:
         """Settings object exposing nothing but the API key."""
 
-        shodan_api_key = API_KEY
+        shodan_api_key = FAKE_KEY_SENTINEL
 
     client = ShodanClient.from_settings(BareSettings(), opener=FakeOpener([]))
 
-    assert client.config.api_key == API_KEY
+    assert client.config.api_key == FAKE_KEY_SENTINEL
     assert client.config.base_url == "https://api.shodan.io"
     assert client.min_seconds_between_calls == 1.0
 
