@@ -14,6 +14,8 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
+from soc.abuseipdb_client import AbuseIPDBClient
+from soc.assets import AssetError, AssetInventory
 from soc.config import ConfigError, get_settings
 from soc.daemon import DaemonConfig, DaemonError, PollingDaemon
 from soc.models import AnalysisSource
@@ -21,7 +23,10 @@ from soc.notifier import NotificationDispatcher
 from soc.openrouter_client import OpenRouterClient, OpenRouterError
 from soc.pipeline import PipelineConfig, PipelineError, SOCPipeline
 from soc.security_onion_client import SecurityOnionClient, SecurityOnionError
+from soc.shodan_client import ShodanClient
+from soc.threat_intel import ThreatIntelEnricher, ThreatIntelError
 from soc.triage import TriageEngine
+from soc.virustotal_client import VirusTotalClient
 from soc.wazuh_client import WazuhClient, WazuhError
 
 JsonDict = dict[str, Any]
@@ -114,6 +119,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Force deterministic local triage even when an OpenRouter key is configured.",
     )
     parser.add_argument(
+        "--no-intel",
+        action="store_true",
+        help="Skip external threat-intel providers even when API keys are configured.",
+    )
+    parser.add_argument(
         "--daemon",
         action="store_true",
         help="Poll continuously instead of running one cycle.",
@@ -192,12 +202,20 @@ def run_from_args(args: argparse.Namespace) -> JsonDict:
     )
     notifier = NotificationDispatcher.from_settings(settings, dry_run=args.dry_run)
     triage_engine = _build_triage_engine(settings, use_llm=not args.no_llm)
+    intel_enricher = _build_intel_enricher(settings, use_intel=not args.no_intel)
     pipeline = SOCPipeline.with_sqlite_store(
         db_path,
         config=config,
         notifier=notifier,
         triage_engine=triage_engine,
+        asset_inventory=_build_asset_inventory(settings),
+        intel_enricher=intel_enricher,
     )
+
+    if intel_enricher is not None:
+        # Share the pipeline's database as the intel cache. Without it, every run
+        # would re-pay for indicators it has already looked up.
+        intel_enricher.cache = getattr(pipeline, "store", None)
 
     # Create the schema before anything reads it. The pipeline initializes the
     # store when it processes events, but the alerts.json read cursor is consulted
@@ -222,12 +240,92 @@ def run_from_args(args: argparse.Namespace) -> JsonDict:
     summary["notifications_enabled"] = args.notify
     summary["dry_run"] = args.dry_run
     summary["triage_mode"] = triage_mode
+    summary["intel_providers"] = (
+        sorted(provider.name for provider in intel_enricher.providers)
+        if intel_enricher is not None
+        else []
+    )
     # Only an LLM-mode run can fall back; a local-mode run scored locally by design.
     if "analysis_sources" in summary:
         summary["local_fallbacks"] = (
             summary["analysis_sources"].get(AnalysisSource.LOCAL.value, 0) if triage_mode == "llm" else 0
         )
     return summary
+
+
+def _build_intel_enricher(settings: Any, *, use_intel: bool) -> ThreatIntelEnricher | None:
+    """Build the external threat-intel enricher from configured provider keys.
+
+    A provider with no key is simply not configured, which is the default and a
+    normal offline mode. A provider whose key is present but whose configuration
+    is invalid is a misconfiguration and fails loudly, the same way an
+    unreadable asset inventory does: quietly dropping it would leave enrichment
+    weaker than the operator believes.
+
+    Inputs:
+        settings: Application settings object.
+        use_intel: Whether external providers are permitted for this run.
+
+    Outputs:
+        ThreatIntelEnricher, or None when no provider is configured.
+
+    Raises:
+        CliError: If a configured provider cannot be built.
+    """
+
+    if not use_intel:
+        return None
+
+    factories = (
+        ("virustotal_api_key", VirusTotalClient),
+        ("abuseipdb_api_key", AbuseIPDBClient),
+        ("shodan_api_key", ShodanClient),
+    )
+
+    providers = []
+    for key_attr, factory in factories:
+        if not str(getattr(settings, key_attr, "") or "").strip():
+            continue
+        try:
+            providers.append(factory.from_settings(settings))
+        except (ThreatIntelError, ValueError) as exc:
+            raise CliError(f"cannot build threat-intel provider from {key_attr}: {exc}") from exc
+
+    if not providers:
+        return None
+
+    return ThreatIntelEnricher(
+        providers,
+        ttl_hours=int(getattr(settings, "enrichment_cache_ttl_hours", 24) or 24),
+    )
+
+
+def _build_asset_inventory(settings: Any) -> AssetInventory | None:
+    """Load the asset inventory when one is configured.
+
+    Running without an inventory is a normal mode and returns None. But a
+    configured-and-unreadable inventory is a misconfiguration worth failing on:
+    continuing silently would leave triage blind to asset criticality while the
+    run still looked healthy.
+
+    Inputs:
+        settings: Application settings object.
+
+    Outputs:
+        Loaded AssetInventory, or None when none is configured.
+
+    Raises:
+        CliError: If a configured inventory cannot be loaded.
+    """
+
+    configured = str(getattr(settings, "asset_inventory_path", "") or "").strip()
+    if not configured:
+        return None
+
+    try:
+        return AssetInventory.from_csv(configured)
+    except AssetError as exc:
+        raise CliError(f"cannot load asset inventory {configured}: {exc}") from exc
 
 
 def _initialize_store(pipeline: Any) -> None:

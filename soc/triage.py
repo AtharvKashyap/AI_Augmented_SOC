@@ -108,6 +108,9 @@ CANDIDATE_CONTEXT_FIELDS: tuple[str, ...] = (
     "primary_user",
     "src_ips",
     "dst_ips",
+    # Asset criticality is often what separates "queue this" from "page someone",
+    # so it is deliberately in the allowlist rather than withheld.
+    "asset_context",
 )
 
 ENRICHMENT_CONTEXT_FIELDS: tuple[str, ...] = (

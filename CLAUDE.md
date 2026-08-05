@@ -28,7 +28,7 @@ Live Wazuh mode (needs a readable `alerts.json`; see "Wazuh ingestion" below):
 python3 run_pipeline.py --wazuh --db data/wazuh_test.db --output output --pretty
 ```
 
-Add `--no-llm` to any run to force deterministic local triage regardless of `OPENROUTER_API_KEY`. Check `triage_mode` and `local_fallbacks` in the JSON summary to see which engine actually scored the run.
+Add `--no-intel` to skip external threat-intel providers, or `--no-llm` to force deterministic local triage regardless of `OPENROUTER_API_KEY`. Check `triage_mode` and `local_fallbacks` in the JSON summary to see which engine actually scored the run.
 
 Security Onion mode (Connect API — **requires a Security Onion Pro licence**):
 
@@ -90,6 +90,19 @@ Things that only become clear after reading several files:
 - **The CLI initializes the database before the first cycle.** The pipeline also initializes its store when it processes events, but the read cursor is consulted *before* that, so the schema must already exist. This bug passed 324 unit tests because every one of them used a fake store; only an end-to-end test with real components caught it. Prefer at least one real-component test per integration seam.
 - **Never bind a filesystem identifier to a SQLite INTEGER column.** Windows `st_ino` is a 128-bit file ID: binding it raises `OverflowError`, and a numeric-looking *string* in a column with INTEGER affinity is silently converted to a float, losing precision and quietly breaking rotation detection. `IngestCursor.file_identity` is therefore one deliberately non-numeric `"<device>-<inode>"` TEXT token, since only equality is ever needed. This was a Windows-only failure that all local runs and both non-Windows CI jobs passed.
 - **`SQLiteStore.initialize()` migrates before it creates.** `CREATE TABLE IF NOT EXISTS` leaves older databases on their original schema, so `_apply_column_migrations` runs first and `ALTER TABLE`s any column listed in `_ADDED_COLUMNS` that is missing. Order matters: indexes in `_SCHEMA_SQL` may reference columns that only exist after migration. When you add a column to an existing table, add it to both places.
+
+### External enrichment
+
+`soc/threat_intel.py` is the only place providers plug in. Four rules are enforced by the layer, not left to each provider — read them before adding a fifth provider:
+
+- **Internal addresses are never sent upstream.** Querying `10.0.1.50` at a third party discloses internal addressing, returns nothing, and burns quota. `_is_global_ip` drops non-global addresses before any call. This also excludes RFC 5737 documentation ranges (`203.0.113.x`, `198.51.100.x`), so most of this repo's fixtures deliberately produce no lookups — use a genuinely routable address in a test that needs one.
+- **A provider failure is contained**, logged and skipped, so an outage costs one lookup rather than the run.
+- **The verdict must live in `summary`.** `ENRICHMENT_CONTEXT_FIELDS` withholds `raw` from the model, so a verdict recorded only in the details would never reach triage. Provider details exist for auditability, not for the prompt.
+- **`to_enrichment_result` drops risk factors for non-escalating verdicts.** Local scoring boosts on any risk factor, so a provider reporting one alongside a clean verdict would silently inflate scores. The invariant is enforced at the boundary so no provider has to remember it.
+
+Verdict policies differ on purpose. VirusTotal treats a **single** flagging engine as `SUSPICIOUS` rather than `MALICIOUS`, because one engine hit is usually a false positive. Shodan can **never** return `MALICIOUS` — it reports what a host exposes, not whether it is bad, and a host with 40 open ports is usually a load balancer. Answers are cached in `enrichment_cache` keyed per provider *and* indicator type; failures are deliberately not cached, since caching one would suppress retries for the whole TTL.
+
+`ASSET_INVENTORY_PATH` is a **string, not a `Path`**, because `Path("")` normalizes to `Path(".")`, which would make "no inventory configured" indistinguishable from "the current directory". An absent inventory is normal; a configured-but-unreadable one fails loudly, because continuing would leave triage blind to asset criticality while the run still looked healthy.
 
 ### Triage quality is measured, not assumed
 

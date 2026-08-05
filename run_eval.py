@@ -24,8 +24,9 @@ from soc.evaluation import (
     evaluate_cases,
     load_labeled_cases,
 )
+from soc.models import utc_now
 from soc.openrouter_client import OpenRouterClient, OpenRouterError
-from soc.triage import TriageEngine
+from soc.triage import TRIAGE_PROMPT_VERSION, TriageEngine
 
 JsonDict = dict[str, Any]
 
@@ -136,6 +137,12 @@ def run_from_args(args: argparse.Namespace) -> tuple[JsonDict, list[str]]:
     summary = report.to_summary()
     summary["triage_mode"] = "llm" if engine.llm_client is not None else "local"
     summary["labels_path"] = str(args.labels)
+    # Attribution, so two runs can actually be compared. A score without the
+    # prompt version and model that produced it cannot tell you whether a later
+    # change helped, hurt, or was simply measured against something different.
+    summary["prompt_version"] = TRIAGE_PROMPT_VERSION
+    summary["model"] = engine.model if engine.llm_client is not None else None
+    summary["evaluated_at"] = utc_now().isoformat()
 
     if args.output is not None:
         args.output.parent.mkdir(parents=True, exist_ok=True)

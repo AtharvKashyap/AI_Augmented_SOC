@@ -226,3 +226,27 @@ def test_promote_command_writes_a_loadable_labeled_set(tmp_path, capsys):
     assert exit_code == 0
     assert main(["--labels", str(labels_path)]) == 0
     assert json.loads(capsys.readouterr().out)["is_analyst_validated"] is True
+
+
+def test_report_records_prompt_version_and_model_for_comparability():
+    """Eval runs must be attributable, or results cannot be compared over time.
+
+    A score without the prompt version and model that produced it is not a data
+    point: a later run cannot tell whether a change helped, hurt, or was simply
+    measured against a different prompt.
+    """
+
+    summary, _ = run_from_args(_args())
+
+    assert summary["prompt_version"]
+    assert "model" in summary
+    assert summary["evaluated_at"]
+
+
+def test_local_runs_report_no_model():
+    """A local run has no model, and must say so rather than imply one."""
+
+    summary, _ = run_from_args(_args())
+
+    assert summary["triage_mode"] == "local"
+    assert summary["model"] is None
