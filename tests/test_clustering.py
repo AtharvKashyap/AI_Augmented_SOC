@@ -23,7 +23,7 @@ from soc.clustering import (
     cluster_alerts,
     extract_alert_entities,
 )
-from soc.models import Alert, AlertSeverity, EventSource
+from soc.models import Alert, AlertSeverity, EventSource, RawEvent
 
 BASE_TIME = datetime(2026, 6, 10, 12, 0, tzinfo=UTC)
 
@@ -405,3 +405,63 @@ def test_alerts_without_timestamps_can_cluster_when_entity_matches():
     assert candidates[0].first_seen is None
     assert candidates[0].last_seen is None
     assert [alert.id for alert in candidates[0].alerts] == ["alert-001", "alert-002"]
+
+def test_firewall_blocks_correlate_with_endpoint_alerts():
+    """A pf block sharing an address with an endpoint alert is one incident view.
+
+    Milestone 5.3 asks for firewall events to correlate with Wazuh and Security
+    Onion alerts. That falls out of entity-based clustering rather than needing
+    dedicated code, which is worth pinning down: it is emergent behavior, so
+    without a test it could regress silently the next time clustering changes.
+    """
+
+    from soc.normalizer import Normalizer
+    from soc.pflog import parse_pflog_line, raw_event_from_pflog
+
+    moment = datetime(2026, 8, 5, 12, 0, tzinfo=UTC)
+    wazuh_event = RawEvent(
+        id="w1",
+        source=EventSource.WAZUH,
+        timestamp=moment,
+        received_at=moment,
+        payload={
+            "rule": {"level": 10, "description": "Suspicious outbound connection"},
+            "agent": {"id": "001", "name": "endpoint-01"},
+            "data": {"srcip": "10.0.1.5", "dstip": "203.0.113.77"},
+        },
+    )
+    pf_event = parse_pflog_line(
+        "Aug 05 12:00:02.123456 rule 12/(match) block out on em0: "
+        "10.0.1.5.51000 > 203.0.113.77.443: S 1:1(0) win 65535"
+    )
+    assert pf_event is not None
+
+    alerts = Normalizer().normalize_many([wazuh_event, raw_event_from_pflog(pf_event)])
+    candidates = AlertClusterer().cluster(alerts)
+
+    assert len(candidates) == 1
+    assert {alert.source for alert in candidates[0].alerts} == {
+        EventSource.WAZUH,
+        EventSource.OPENBSD_PF,
+    }
+
+
+def test_a_firewall_block_alone_does_not_look_like_a_detection():
+    """Firewall activity is context: a block on its own must stay low severity.
+
+    A busy firewall generating high-severity alerts would bury real detections,
+    so this guards the severity mapping from the clustering side too.
+    """
+
+    from soc.normalizer import Normalizer
+    from soc.pflog import parse_pflog_line, raw_event_from_pflog
+    from soc.triage import local_triage_candidate
+
+    pf_event = parse_pflog_line(
+        "Aug 05 12:00:02.123456 rule 12/(match) block in on em0: "
+        "203.0.113.9.4444 > 10.0.1.5.22: S 1:1(0) win 65535"
+    )
+    alerts = Normalizer().normalize_many([raw_event_from_pflog(pf_event)])
+    candidate = AlertClusterer().cluster(alerts)[0]
+
+    assert local_triage_candidate(candidate).score <= 3

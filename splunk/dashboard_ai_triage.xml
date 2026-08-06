@@ -1,0 +1,195 @@
+<form theme="dark">
+  <label>AI Triage Overview</label>
+  <description>
+    Triage and incident output pushed by soc/splunk_client.py as sourcetype=ai_triage.
+    Only derived fields are forwarded, so no raw alert payload is searchable here.
+    Untested against a live Splunk instance.
+  </description>
+
+  <fieldset submitButton="false" autoRun="true">
+    <input type="time" token="window">
+      <label>Time range</label>
+      <default>
+        <earliest>-24h</earliest>
+        <latest>now</latest>
+      </default>
+    </input>
+    <input type="dropdown" token="source_filter" searchWhenChanged="true">
+      <label>Analysis source</label>
+      <choice value="*">All</choice>
+      <choice value="llm">Model (llm)</choice>
+      <choice value="local">Heuristic (local)</choice>
+      <default>*</default>
+      <initialValue>*</initialValue>
+    </input>
+  </fieldset>
+
+  <row>
+    <panel>
+      <title>Routing breakdown: queued vs paged vs likely benign</title>
+      <chart>
+        <search>
+          <query>
+            sourcetype=ai_triage action=* analysis_source=$source_filter$
+            | stats count by action
+            | eval action = case(
+                action=="page_now", "Paged now",
+                action=="queue_review", "Queued for review",
+                action=="mark_likely_benign", "Marked likely benign",
+                true(), action)
+            | sort -count
+          </query>
+          <earliest>$window.earliest$</earliest>
+          <latest>$window.latest$</latest>
+        </search>
+        <option name="charting.chart">pie</option>
+        <option name="charting.legend.placement">right</option>
+      </chart>
+    </panel>
+    <panel>
+      <title>Routing volume over time</title>
+      <chart>
+        <search>
+          <query>
+            sourcetype=ai_triage action=* analysis_source=$source_filter$
+            | timechart span=1h count by action
+          </query>
+          <earliest>$window.earliest$</earliest>
+          <latest>$window.latest$</latest>
+        </search>
+        <option name="charting.chart">column</option>
+        <option name="charting.chart.stackMode">stacked</option>
+        <option name="charting.axisTitleY.text">Results</option>
+      </chart>
+    </panel>
+  </row>
+
+  <row>
+    <panel>
+      <title>Score distribution over time</title>
+      <chart>
+        <search>
+          <query>
+            sourcetype=ai_triage action=* analysis_source=$source_filter$
+            | eval score_band = case(
+                score &gt;= 8, "8-10 page",
+                score &gt;= 4, "4-7 queue",
+                true(), "1-3 likely benign")
+            | timechart span=1h count by score_band
+          </query>
+          <earliest>$window.earliest$</earliest>
+          <latest>$window.latest$</latest>
+        </search>
+        <option name="charting.chart">line</option>
+        <option name="charting.axisTitleY.text">Results</option>
+        <option name="charting.legend.placement">bottom</option>
+      </chart>
+    </panel>
+    <panel>
+      <title>Raw score histogram</title>
+      <chart>
+        <search>
+          <query>
+            sourcetype=ai_triage action=* analysis_source=$source_filter$
+            | stats count by score
+            | sort +score
+          </query>
+          <earliest>$window.earliest$</earliest>
+          <latest>$window.latest$</latest>
+        </search>
+        <option name="charting.chart">column</option>
+        <option name="charting.axisTitleX.text">Score</option>
+        <option name="charting.axisTitleY.text">Results</option>
+      </chart>
+    </panel>
+  </row>
+
+  <row>
+    <panel>
+      <title>Model-scored vs heuristic-scored results</title>
+      <html>
+        <p>
+          A score produced by the deterministic local rules is not the same evidence
+          as a model score, and a failed model call falls back to local scoring. If
+          this panel is mostly <code>local</code> during a run you expected to be
+          model-assisted, the model path is degrading silently.
+        </p>
+      </html>
+      <chart>
+        <search>
+          <query>
+            sourcetype=ai_triage action=*
+            | eval analysis_source = if(isnull(analysis_source), "unrecorded", analysis_source)
+            | timechart span=1h count by analysis_source
+          </query>
+          <earliest>$window.earliest$</earliest>
+          <latest>$window.latest$</latest>
+        </search>
+        <option name="charting.chart">area</option>
+        <option name="charting.chart.stackMode">stacked</option>
+        <option name="charting.axisTitleY.text">Results</option>
+      </chart>
+    </panel>
+    <panel>
+      <title>Score and action by analysis source</title>
+      <table>
+        <search>
+          <query>
+            sourcetype=ai_triage action=*
+            | eval analysis_source = if(isnull(analysis_source), "unrecorded", analysis_source)
+            | stats count as results avg(score) as avg_score
+                  count(eval(action=="page_now")) as paged
+                  count(eval(action=="mark_likely_benign")) as likely_benign
+                  dc(model) as models
+                  by analysis_source
+            | eval avg_score = round(avg_score, 2)
+            | sort -results
+          </query>
+          <earliest>$window.earliest$</earliest>
+          <latest>$window.latest$</latest>
+        </search>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+  </row>
+
+  <row>
+    <panel>
+      <title>Paged results</title>
+      <table>
+        <search>
+          <query>
+            sourcetype=ai_triage action="page_now" analysis_source=$source_filter$
+            | table _time target_id target_type score classification fp_likelihood analysis_source model prompt_version summary
+            | sort -_time
+          </query>
+          <earliest>$window.earliest$</earliest>
+          <latest>$window.latest$</latest>
+        </search>
+        <option name="count">20</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+  </row>
+
+  <row>
+    <panel>
+      <title>Incidents by host</title>
+      <table>
+        <search>
+          <query>
+            sourcetype=ai_triage candidate_count=*
+            | stats count as incidents max(max_score) as worst_score
+                  sum(alert_count) as alerts values(primary_user) as users
+                  by primary_host
+            | sort -incidents -worst_score
+          </query>
+          <earliest>$window.earliest$</earliest>
+          <latest>$window.latest$</latest>
+        </search>
+        <option name="count">20</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+  </row>
+</form>

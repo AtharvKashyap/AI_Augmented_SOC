@@ -58,9 +58,10 @@ class Normalizer:
             return normalize_wazuh_event(event)
         if event.source == EventSource.SECURITY_ONION:
             return normalize_security_onion_event(event)
+        if event.source == EventSource.OPENBSD_PF:
+            return normalize_openbsd_pf_event(event)
         if event.source in {
             EventSource.REPLAY,
-            EventSource.OPENBSD_PF,
             EventSource.SPLUNK,
             EventSource.UNKNOWN,
         }:
@@ -315,6 +316,58 @@ def normalize_security_onion_event(event: RawEvent) -> Alert:
     )
 
 
+def normalize_openbsd_pf_event(event: RawEvent) -> Alert:
+    """Normalize an OpenBSD pf RawEvent into an Alert.
+
+    The payload is the parsed pflog dictionary produced by
+    soc.pflog.PflogEvent.to_payload(), so field names are already flat and
+    known. The whole payload is kept in Alert.raw, including ports and the
+    original log line, because the Alert model has no port fields and a firewall
+    decision is only auditable with the line it came from.
+
+    Severity is deliberately capped: a `block` normalizes to LOW and a `pass` to
+    INFO, and nothing here can produce HIGH. A blocked packet is the firewall
+    doing exactly what it was configured to do, and a busy internet-facing
+    firewall blocks thousands of packets an hour. Mapping that to HIGH would
+    flood triage and the routing thresholds with firewall noise and bury the
+    endpoint and network detections an analyst actually needs to see. Firewall
+    events are context for other alerts, not detections in their own right;
+    correlation is what makes them interesting, not their own severity.
+
+    Inputs:
+        event: RawEvent with source EventSource.OPENBSD_PF.
+
+    Outputs:
+        Normalized Alert object.
+    """
+
+    payload = event.payload
+    action = _first_string(payload, ["action"])
+    direction = _first_string(payload, ["direction"])
+    interface = _first_string(payload, ["interface"])
+    timestamp = _extract_timestamp(event, ["timestamp", "@timestamp"])
+
+    return Alert(
+        id=_build_alert_id(event, preferred_id=_first_string(payload, ["id", "event_id"])),
+        source=EventSource.OPENBSD_PF,
+        timestamp=timestamp,
+        severity=severity_from_pf_action(action),
+        source_severity=action,
+        rule_name=_build_pf_rule_name(action, direction, interface),
+        rule_groups=_build_pf_rule_groups(action),
+        src_ip=_first_string(payload, ["src_ip", "source.ip", "srcip"]),
+        dst_ip=_first_string(payload, ["dst_ip", "destination.ip", "dstip"]),
+        hostname=_first_string(payload, ["hostname", "host.name", "firewall_hostname"]),
+        agent_id=_first_string(payload, ["agent_id", "agent.id"]),
+        agent_os=_first_string(payload, ["agent_os", "host.os.name"]),
+        user=None,
+        process_name=None,
+        command_line=None,
+        raw_event_id=event.id,
+        raw=payload,
+    )
+
+
 def normalize_generic_event(event: RawEvent) -> Alert:
     """Normalize a replay, unknown, or future-source event into an Alert.
 
@@ -414,6 +467,31 @@ def severity_from_security_onion(value: Any) -> AlertSeverity:
     return AlertSeverity.INFO
 
 
+def severity_from_pf_action(value: Any) -> AlertSeverity:
+    """Map an OpenBSD pf action to a normalized severity.
+
+    Firewall activity is context, not detection, so this mapping has a hard
+    ceiling of LOW:
+        block: low
+        anything else, including pass and match: info
+
+    A firewall that blocks a packet has already handled it. Escalating that would
+    make every scan against an internet-facing interface look like an incident.
+
+    Inputs:
+        value: pf action text such as "block" or "pass".
+
+    Outputs:
+        AlertSeverity.LOW for a block, AlertSeverity.INFO otherwise.
+    """
+
+    if value is None:
+        return AlertSeverity.INFO
+    if str(value).strip().lower() == "block":
+        return AlertSeverity.LOW
+    return AlertSeverity.INFO
+
+
 def severity_from_text_or_number(value: Any) -> AlertSeverity:
     """Best-effort severity mapping from common text or numeric values.
 
@@ -451,6 +529,51 @@ def severity_from_text_or_number(value: Any) -> AlertSeverity:
     if text in {"info", "informational", "debug", "trace"}:
         return AlertSeverity.INFO
     return AlertSeverity.UNKNOWN
+
+
+def _build_pf_rule_name(action: str | None, direction: str | None, interface: str | None) -> str:
+    """Build a readable rule name for an OpenBSD pf event.
+
+    pf has no rule descriptions, only rule numbers, so the human-readable name
+    has to be composed from the decision itself.
+
+    Inputs:
+        action: pf action such as "block" or "pass".
+        direction: Packet direction, "in" or "out".
+        interface: Interface name the rule matched on.
+
+    Outputs:
+        Rule name such as "pf block in on em0", degrading as fields are missing.
+    """
+
+    parts = ["pf"]
+    if action:
+        parts.append(action.lower())
+    if direction:
+        parts.append(direction.lower())
+    if interface:
+        parts.extend(["on", interface])
+
+    if len(parts) == 1:
+        return "pf firewall event"
+    return " ".join(parts)
+
+
+def _build_pf_rule_groups(action: str | None) -> list[str]:
+    """Build rule groups for an OpenBSD pf event.
+
+    Inputs:
+        action: pf action such as "block" or "pass".
+
+    Outputs:
+        Groups list, always starting with "firewall" and "pf" so firewall
+        context is selectable regardless of the action.
+    """
+
+    groups = ["firewall", "pf"]
+    if action:
+        groups.append(action.strip().lower())
+    return groups
 
 
 def _extract_timestamp(event: RawEvent, paths: list[str]) -> datetime | None:

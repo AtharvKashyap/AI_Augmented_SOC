@@ -36,6 +36,14 @@ Security Onion mode (Connect API — **requires a Security Onion Pro licence**):
 python3 run_pipeline.py --security-onion --output output --pretty
 ```
 
+OpenBSD firewall context and Splunk output (Phase 5):
+
+```bash
+tcpdump -n -e -ttt -r /var/log/pflog > pflog.txt   # OPENBSD_PFLOG_TEXT_PATH reads this
+python3 run_pipeline.py --pflog --pretty
+python3 run_pipeline.py --wazuh --splunk           # push results to Splunk HEC after the run
+```
+
 Continuous polling (Milestone 1.6):
 
 ```bash
@@ -94,6 +102,14 @@ Things that only become clear after reading several files:
 - **The CLI initializes the database before the first cycle.** The pipeline also initializes its store when it processes events, but the read cursor is consulted *before* that, so the schema must already exist. This bug passed 324 unit tests because every one of them used a fake store; only an end-to-end test with real components caught it. Prefer at least one real-component test per integration seam.
 - **Never bind a filesystem identifier to a SQLite INTEGER column.** Windows `st_ino` is a 128-bit file ID: binding it raises `OverflowError`, and a numeric-looking *string* in a column with INTEGER affinity is silently converted to a float, losing precision and quietly breaking rotation detection. `IngestCursor.file_identity` is therefore one deliberately non-numeric `"<device>-<inode>"` TEXT token, since only equality is ever needed. This was a Windows-only failure that all local runs and both non-Windows CI jobs passed.
 - **`SQLiteStore.initialize()` migrates before it creates.** `CREATE TABLE IF NOT EXISTS` leaves older databases on their original schema, so `_apply_column_migrations` runs first and `ALTER TABLE`s any column listed in `_ADDED_COLUMNS` that is missing. Order matters: indexes in `_SCHEMA_SQL` may reference columns that only exist after migration. When you add a column to an existing table, add it to both places.
+
+### Firewall and Splunk integration
+
+- **`OPENBSD_PFLOG_TEXT_PATH` is not `OPENBSD_PFLOG_PATH`.** The latter is `/var/log/pflog`, a pcap file; ingestion reads `tcpdump -n -e -ttt -r` text output. Pointing the reader at the binary gives a silent zero-result run, which is why they are separate settings.
+- **The pflog line regex is inferred, not verified** against a real OpenBSD host. It lives in one `PFLOG_LINE_PATTERN` constant, marked as such, so a real deployment corrects it in one place — same approach as the undocumented Security Onion query parameters.
+- **A pf `block` maps to `LOW`, a `pass` to `INFO`, and nothing in that path can return `HIGH`.** A block is the firewall working as configured; mapping firewall volume to high severity would bury real detections. Do not "fix" this by raising it.
+- **pf correlation is emergent, not coded.** Entity-based clustering already merges a pf event with an endpoint alert sharing an address. There is a test pinning it precisely because nothing in `clustering.py` mentions firewalls, so it could regress invisibly.
+- **Splunk output is opt-in and sends derived fields only** — never raw source events or enrichment `raw`, so the index does not become a second copy of raw telemetry. The HEC token is scrubbed from exceptions and logs, because HEC error bodies get quoted into messages. `--splunk` with `--daemon` is refused rather than silently sending nothing per cycle.
 
 ### The incident tier
 
@@ -180,6 +196,7 @@ Config tests write a throwaway `.env.test` under `tmp_path` and `monkeypatch.del
 - `tests/conftest.py` snapshots and restores `os.environ` and the settings cache around every test. This is load-bearing: `get_settings` uses `load_dotenv`, which writes into `os.environ` permanently and does **not** override variables that are already set, so without isolation one test's `.env` silently wins over a later test's and the suite becomes order-dependent.
 - Assert on score *bands*, never exact triage scores, so tuning the heuristic does not produce false failures.
 - **Fake credentials in tests must be low-entropy and self-describing**, e.g. `"fake-key-do-not-report"`, and must not be assigned to a name like `API_KEY`. A random-looking value trips the Gitleaks job, and on entropy alone a scanner cannot tell a sentinel from a real key. Note the PR-mode scan covers the whole PR commit range, so removing a flagged string in a *later* commit does not clear it — the branch history has to not contain it.
+- **Never compare `str(Path)` to a slashed literal.** `Path` normalizes separators per platform, so `str(Path("/var/log/pflog"))` is `\var\log\pflog` on Windows. Compare `Path` to `Path` instead. Settings that are `str` by design (`asset_inventory_path`, `openbsd_pflog_text_path`) do not normalize and can be compared literally.
 - **Never hardcode byte arithmetic in a test.** Windows text-mode writes translate `\n` to `\r\n`, so `len(text) + 1` is a POSIX-only assumption that fails there. Compare against the actual `st_size`, or capture a size before and after and compare those. Two Windows-only CI failures came from this. The reader itself reads in binary and counts real bytes, so CRLF input is handled correctly and there is a test proving it.
 
 ## Not built yet

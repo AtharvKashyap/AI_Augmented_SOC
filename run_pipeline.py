@@ -21,9 +21,15 @@ from soc.daemon import DaemonConfig, DaemonError, PollingDaemon
 from soc.models import AnalysisSource
 from soc.notifier import NotificationDispatcher
 from soc.openrouter_client import OpenRouterClient, OpenRouterError
+from soc.pflog import (
+    PflogError,
+    raw_event_from_pflog,
+    read_pflog_file,
+)
 from soc.pipeline import PipelineConfig, PipelineError, SOCPipeline
 from soc.security_onion_client import SecurityOnionClient, SecurityOnionError
 from soc.shodan_client import ShodanClient
+from soc.splunk_client import SplunkClient, SplunkError
 from soc.threat_intel import ThreatIntelEnricher, ThreatIntelError
 from soc.triage import TriageEngine
 from soc.virustotal_client import VirusTotalClient
@@ -64,6 +70,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--wazuh",
         action="store_true",
         help="Read recent alerts from the Wazuh Manager alerts.json file and process them.",
+    )
+    source_group.add_argument(
+        "--pflog",
+        action="store_true",
+        help="Read OpenBSD pflog text output and process it as firewall context.",
     )
     source_group.add_argument(
         "--security-onion",
@@ -124,6 +135,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Skip external threat-intel providers even when API keys are configured.",
     )
     parser.add_argument(
+        "--splunk",
+        action="store_true",
+        help="Push triage results and incidents to Splunk via HEC after the run.",
+    )
+    parser.add_argument(
         "--daemon",
         action="store_true",
         help="Poll continuously instead of running one cycle.",
@@ -163,7 +179,15 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     try:
         summary = run_from_args(args)
-    except (CliError, ConfigError, PipelineError, SecurityOnionError, WazuhError) as exc:
+    except (
+        CliError,
+        ConfigError,
+        PflogError,
+        PipelineError,
+        SecurityOnionError,
+        SplunkError,
+        WazuhError,
+    ) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
@@ -231,8 +255,9 @@ def run_from_args(args: argparse.Namespace) -> JsonDict:
 
     if args.daemon:
         summary = _run_daemon(args, settings, run_cycle)
+        run_result: Any | None = None
     else:
-        summary = _run_once(args, run_cycle)
+        summary, run_result = _run_once(args, run_cycle)
 
     summary["source_mode"] = source_mode
     summary["db_path"] = str(db_path)
@@ -240,6 +265,7 @@ def run_from_args(args: argparse.Namespace) -> JsonDict:
     summary["notifications_enabled"] = args.notify
     summary["dry_run"] = args.dry_run
     summary["triage_mode"] = triage_mode
+    summary["splunk_events_sent"] = _push_to_splunk(args, settings, summary, run_result)
     summary["intel_providers"] = (
         sorted(provider.name for provider in intel_enricher.providers)
         if intel_enricher is not None
@@ -300,6 +326,68 @@ def _build_intel_enricher(settings: Any, *, use_intel: bool) -> ThreatIntelEnric
     )
 
 
+def _push_to_splunk(
+    args: argparse.Namespace,
+    settings: Any,
+    summary: JsonDict,
+    result: Any | None,
+) -> int:
+    """Push triage results and incidents to Splunk when asked.
+
+    Sending SOC results to a third-party index is opt-in, so this does nothing
+    without --splunk. Requesting it without HEC settings is a misconfiguration
+    and fails loudly, but a send that fails at runtime is recorded and tolerated:
+    the results are already persisted locally, so losing the run over a
+    dashboard write would be the wrong trade.
+
+    Inputs:
+        args: Parsed argparse namespace.
+        settings: Application settings object.
+        summary: Mutable run summary, used to record send errors.
+        result: Run result carrying the objects to send, or None in daemon mode.
+
+    Outputs:
+        Number of events sent.
+
+    Raises:
+        CliError: If --splunk is requested but HEC settings are missing, or if it
+        is combined with --daemon, which is not supported yet.
+    """
+
+    if not args.splunk:
+        return 0
+
+    if not str(getattr(settings, "splunk_hec_url", "") or "").strip():
+        raise CliError("--splunk requires SPLUNK_HEC_URL and SPLUNK_HEC_TOKEN")
+
+    if result is None:
+        # Better to refuse than to accept the flag and quietly send nothing every
+        # cycle. Per-cycle pushing is a real feature, not an accident of wiring.
+        raise CliError("--splunk is not supported with --daemon yet")
+
+    try:
+        client = SplunkClient.from_settings(settings)
+    except SplunkError as exc:
+        raise CliError(f"cannot build Splunk client: {exc}") from exc
+
+    triage_results = [item.triage for item in getattr(result, "item_results", [])]
+    incidents = list(getattr(result, "incidents", []))
+
+    sent = 0
+    errors = summary.setdefault("errors", [])
+    for label, send in (
+        ("triage results", lambda: client.send_triage_results(triage_results)),
+        ("incidents", lambda: client.send_incidents(incidents)),
+    ):
+        try:
+            sent += int(send() or 0)
+        except Exception as exc:
+            # Results are already persisted locally, so a failed dashboard write
+            # is recorded rather than allowed to fail the run.
+            errors.append(f"splunk push of {label} failed: {exc}")
+    return sent
+
+
 def _build_asset_inventory(settings: Any) -> AssetInventory | None:
     """Load the asset inventory when one is configured.
 
@@ -350,7 +438,7 @@ def _initialize_store(pipeline: Any) -> None:
         raise CliError(f"cannot initialize database: {exc}") from exc
 
 
-def _run_once(args: argparse.Namespace, run_cycle: Callable[[], Any]) -> JsonDict:
+def _run_once(args: argparse.Namespace, run_cycle: Callable[[], Any]) -> tuple[JsonDict, Any]:
     """Run one pipeline cycle and summarize it.
 
     Inputs:
@@ -358,7 +446,8 @@ def _run_once(args: argparse.Namespace, run_cycle: Callable[[], Any]) -> JsonDic
         run_cycle: Callable performing one cycle.
 
     Outputs:
-        JSON-safe summary dictionary.
+        Tuple of JSON-safe summary and the run result, which downstream steps
+        such as the Splunk push need the actual objects from.
     """
 
     del args
@@ -366,7 +455,7 @@ def _run_once(args: argparse.Namespace, run_cycle: Callable[[], Any]) -> JsonDic
     summary = result.to_summary()
     summary["reports_written"] = [str(path) for path in result.report_paths]
     summary["analysis_sources"] = _count_analysis_sources(result)
-    return summary
+    return summary, result
 
 
 def _run_daemon(
@@ -455,6 +544,21 @@ def _build_run_cycle(
             return pipeline.run_events(events)
 
         return _wazuh_cycle
+    if args.pflog:
+        configured = str(getattr(settings, "openbsd_pflog_text_path", "") or "").strip()
+        if not configured:
+            raise CliError(
+                "--pflog requires OPENBSD_PFLOG_TEXT_PATH. That is the text output of "
+                "`tcpdump -n -e -ttt -r /var/log/pflog`, not the pcap file itself."
+            )
+
+        def _pflog_cycle() -> Any:
+            """Read pflog text output and process it."""
+
+            events = [raw_event_from_pflog(event) for event in read_pflog_file(configured)]
+            return pipeline.run_events(events)
+
+        return _pflog_cycle
     if args.security_onion:
         onion = SecurityOnionClient.from_settings(settings)
 
@@ -465,7 +569,7 @@ def _build_run_cycle(
 
         return _security_onion_cycle
     raise CliError(
-        "one source is required: --replay, --replay-dir, --wazuh, or --security-onion"
+        "one source is required: --replay, --replay-dir, --wazuh, --security-onion, or --pflog"
     )
 
 
@@ -552,10 +656,12 @@ def _source_mode(args: argparse.Namespace) -> str:
         return "replay_dir"
     if args.wazuh:
         return "wazuh"
+    if args.pflog:
+        return "pflog"
     if args.security_onion:
         return "security_onion"
     raise CliError(
-        "one source is required: --replay, --replay-dir, --wazuh, or --security-onion"
+        "one source is required: --replay, --replay-dir, --wazuh, --security-onion, or --pflog"
     )
 
 

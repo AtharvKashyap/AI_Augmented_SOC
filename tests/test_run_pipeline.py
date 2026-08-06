@@ -51,6 +51,11 @@ class FakeSettings:
     poll_interval_seconds: int = 120
     log_dir: Path = Path("logs")
     asset_inventory_path: str = ""
+    openbsd_pflog_text_path: str = ""
+    splunk_hec_url: str = ""
+    splunk_hec_token: str = ""
+    splunk_hec_index: str = ""
+    splunk_hec_sourcetype: str = "ai_triage"
     virustotal_api_key: str = ""
     abuseipdb_api_key: str = ""
     shodan_api_key: str = ""
@@ -307,6 +312,7 @@ def _args(**overrides: Any) -> argparse.Namespace:
         "replay_dir": None,
         "wazuh": False,
         "security_onion": False,
+        "pflog": False,
         "env_file": Path(".env"),
         "db": None,
         "output": None,
@@ -317,6 +323,7 @@ def _args(**overrides: Any) -> argparse.Namespace:
         "fail_fast": False,
         "no_llm": False,
         "no_intel": False,
+        "splunk": False,
         "daemon": False,
         "poll_interval": None,
         "max_cycles": None,
@@ -1140,3 +1147,97 @@ def test_build_parser_accepts_no_intel_flag():
     """The offline override must be reachable from the command line."""
 
     assert build_parser().parse_args(["--wazuh", "--no-intel"]).no_intel is True
+
+
+def test_build_parser_accepts_pflog_source():
+    """Firewall logs must be selectable as an ingestion source."""
+
+    assert build_parser().parse_args(["--pflog"]).pflog is True
+
+
+def test_run_from_args_reads_the_configured_pflog_text_file(monkeypatch, tmp_path):
+    """pflog ingestion must read the text path, not the binary pcap."""
+
+    settings = _patch_cli_dependencies(monkeypatch, tmp_path)
+    pflog_file = tmp_path / "pflog.txt"
+    pflog_file.write_text(
+        "Aug 05 12:00:00.123456 rule 12/(match) block in on em0: "
+        "203.0.113.9.4444 > 10.0.1.5.22: S 1:1(0) win 65535\n",
+        encoding="utf-8",
+    )
+    settings.openbsd_pflog_text_path = str(pflog_file)
+
+    summary = run_from_args(_args(pflog=True))
+
+    assert summary["source_mode"] == "pflog"
+    assert len(FakeSOCPipeline.last_instance.run_events_calls[0]) == 1
+
+
+def test_pflog_without_a_configured_path_is_a_cli_error(monkeypatch, tmp_path):
+    """Asking for pflog ingestion with nothing to read is a misconfiguration."""
+
+    _patch_cli_dependencies(monkeypatch, tmp_path)
+
+    with pytest.raises(CliError, match="OPENBSD_PFLOG_TEXT_PATH"):
+        run_from_args(_args(pflog=True))
+
+
+def test_splunk_push_is_off_unless_requested(monkeypatch, tmp_path):
+    """Sending results to a third-party index must be opt-in."""
+
+    settings = _patch_cli_dependencies(monkeypatch, tmp_path)
+    settings.splunk_hec_url = "https://splunk.example:8088"
+    settings.splunk_hec_token = "tok"
+    replay_file = tmp_path / "replay.json"
+    replay_file.write_text("[]", encoding="utf-8")
+
+    summary = run_from_args(_args(replay=replay_file))
+
+    assert summary["splunk_events_sent"] == 0
+
+
+def test_splunk_requested_without_configuration_is_a_cli_error(monkeypatch, tmp_path):
+    """--splunk with no HEC settings is a misconfiguration, not a silent no-op."""
+
+    _patch_cli_dependencies(monkeypatch, tmp_path)
+    replay_file = tmp_path / "replay.json"
+    replay_file.write_text("[]", encoding="utf-8")
+
+    with pytest.raises(CliError, match="SPLUNK_HEC_URL"):
+        run_from_args(_args(replay=replay_file, splunk=True))
+
+
+def test_splunk_send_failure_is_recorded_without_losing_the_run(monkeypatch, tmp_path):
+    """Results are already persisted, so a failed push must not fail the run."""
+
+    settings = _patch_cli_dependencies(monkeypatch, tmp_path)
+    settings.splunk_hec_url = "https://splunk.example:8088"
+    settings.splunk_hec_token = "tok"
+
+    class _BrokenSplunk:
+        """Splunk client whose sends always fail."""
+
+        @classmethod
+        def from_settings(cls, settings: Any) -> _BrokenSplunk:
+            """Return a client that cannot send."""
+
+            return cls()
+
+        def send_triage_results(self, results: Any) -> int:
+            """Always fail."""
+
+            raise RuntimeError("splunk unreachable")
+
+        def send_incidents(self, incidents: Any) -> int:
+            """Always fail."""
+
+            raise RuntimeError("splunk unreachable")
+
+    monkeypatch.setattr(run_pipeline, "SplunkClient", _BrokenSplunk)
+    replay_file = tmp_path / "replay.json"
+    replay_file.write_text("[]", encoding="utf-8")
+
+    summary = run_from_args(_args(replay=replay_file, splunk=True))
+
+    assert summary["splunk_events_sent"] == 0
+    assert any("splunk" in error.lower() for error in summary["errors"])

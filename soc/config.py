@@ -134,6 +134,13 @@ class Settings:
     openbsd_pf_host: str
     openbsd_pf_user: str
     openbsd_pflog_path: Path
+    # Separate from openbsd_pflog_path on purpose. /var/log/pflog is a pcap file;
+    # the ingestion path reads the text output of `tcpdump -r`, which is a
+    # different artifact. Conflating them would have an operator point the reader
+    # at binary data and get silent zero results. Empty means pflog ingestion is
+    # not configured, which is a normal mode, so this is a string rather than a
+    # Path for the same reason as asset_inventory_path.
+    openbsd_pflog_text_path: str
     openbsd_pf_block_table: str
 
     def ensure_directories(self) -> None:
@@ -457,6 +464,7 @@ def _load_settings_from_env() -> Settings:
         openbsd_pf_host=_get_str("OPENBSD_PF_HOST", ""),
         openbsd_pf_user=_get_str("OPENBSD_PF_USER", ""),
         openbsd_pflog_path=_get_path("OPENBSD_PFLOG_PATH", "/var/log/pflog"),
+        openbsd_pflog_text_path=_get_str("OPENBSD_PFLOG_TEXT_PATH", ""),
         openbsd_pf_block_table=_get_str("OPENBSD_PF_BLOCK_TABLE", "ai_soc_blocklist"),
     )
 

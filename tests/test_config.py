@@ -390,3 +390,50 @@ def test_asset_inventory_path_defaults_to_empty(tmp_path):
     env_file = _write_env_file(tmp_path, "OUTPUT_DIR=output")
 
     assert str(get_settings(env_file, reload=True).asset_inventory_path) == ""
+
+
+def test_pflog_text_path_is_separate_from_the_binary_pflog_path(tmp_path):
+    """The parser reads tcpdump text, not the binary pcap, so they differ.
+
+    `OPENBSD_PFLOG_PATH` points at /var/log/pflog, which is a pcap file the
+    ingestion path cannot read directly. Conflating the two would make an
+    operator point the reader at binary data and get silent zero results.
+
+    Inputs:
+        tmp_path: Pytest temporary directory fixture.
+
+    Outputs:
+        None. Assertions verify both paths load independently.
+    """
+
+    env_file = _write_env_file(
+        tmp_path,
+        """
+        OPENBSD_PFLOG_PATH=/var/log/pflog
+        OPENBSD_PFLOG_TEXT_PATH=data/pflog.txt
+        """,
+    )
+
+    settings = get_settings(env_file, reload=True)
+
+    # Compared as Paths, not as strings: Path normalizes separators per platform,
+    # so str(Path("/var/log/pflog")) is "\\var\\log\\pflog" on Windows. The text
+    # path is a plain str by design, so it stays literal, which is the difference
+    # this test is really about.
+    assert settings.openbsd_pflog_path == Path("/var/log/pflog")
+    assert settings.openbsd_pflog_text_path == "data/pflog.txt"
+
+
+def test_pflog_text_path_defaults_to_empty(tmp_path):
+    """Running without pflog ingestion is a normal mode.
+
+    Inputs:
+        tmp_path: Pytest temporary directory fixture.
+
+    Outputs:
+        None. Assertion verifies the default is empty.
+    """
+
+    env_file = _write_env_file(tmp_path, "OUTPUT_DIR=output")
+
+    assert get_settings(env_file, reload=True).openbsd_pflog_text_path == ""
