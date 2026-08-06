@@ -1,0 +1,61 @@
+[
+  {
+    "id": "wazuh-amb-groupadd-001",
+    "source": "wazuh",
+    "timestamp": "2026-07-14T14:22:41Z",
+    "payload": {
+      "id": "wazuh-amb-groupadd-001",
+      "timestamp": "2026-07-14T14:22:41Z",
+      "agent": {
+        "id": "003",
+        "name": "dc-01",
+        "ip": "10.0.1.10",
+        "os": {
+          "name": "Windows Server 2022"
+        }
+      },
+      "manager": {
+        "name": "wazuh-manager-01"
+      },
+      "rule": {
+        "id": "60112",
+        "level": 8,
+        "description": "Group Management: A member was added to a security-enabled global group.",
+        "groups": [
+          "windows",
+          "windows_security",
+          "policy_changed",
+          "account_changed"
+        ],
+        "mitre": {
+          "id": [
+            "T1098"
+          ],
+          "tactic": [
+            "Persistence"
+          ],
+          "technique": [
+            "Account Manipulation"
+          ]
+        }
+      },
+      "data": {
+        "win": {
+          "system": {
+            "providerName": "Microsoft-Windows-Security-Auditing",
+            "eventID": "4728",
+            "computer": "dc-01.corp.internal"
+          },
+          "eventdata": {
+            "subjectUserName": "helpdesk_tsmith",
+            "subjectDomainName": "CORP",
+            "memberName": "CN=jrivera,OU=Staff,DC=corp,DC=internal",
+            "targetUserName": "Server Operators",
+            "targetDomainName": "CORP"
+          }
+        }
+      },
+      "full_log": "Windows security event 4728: helpdesk_tsmith added jrivera to CORP\\Server Operators on dc-01"
+    }
+  }
+]

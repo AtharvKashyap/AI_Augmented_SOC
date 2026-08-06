@@ -111,6 +111,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             "not accuracy. Only analyst-reviewed labels support an accuracy claim.",
             file=sys.stderr,
         )
+    if summary["split_cases"]:
+        # Scoring the worst candidate keeps the evidence, but this is not the one
+        # incident the label describes, so it must not pass unremarked.
+        named = ", ".join(
+            f"{case_id} ({count} candidates)"
+            for case_id, count in sorted(summary["split_cases"].items())
+        )
+        print(
+            "note: these cases span more than one clustering window and were scored on their "
+            f"worst candidate rather than as one incident: {named}. Compress the fixture's "
+            "timestamps or widen the clustering window.",
+            file=sys.stderr,
+        )
     for failure in failures:
         print(f"threshold unmet: {failure}", file=sys.stderr)
 

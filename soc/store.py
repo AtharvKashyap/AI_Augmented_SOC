@@ -482,10 +482,11 @@ class SQLiteStore:
                 INSERT OR REPLACE INTO triage_results (
                     id, target_id, target_type, score, fp_likelihood,
                     classification, action, summary, model, latency_ms,
-                    analysis_source, prompt_version, payload_json,
+                    analysis_source, prompt_version,
+                    enrichment_providers, enriched_at, payload_json,
                     created_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     result.id,
@@ -500,6 +501,10 @@ class SQLiteStore:
                     result.latency_ms,
                     result.analysis_source.value,
                     result.prompt_version,
+                    # Comma-joined rather than JSON so `LIKE '%VirusTotal%'` works
+                    # without a parse; the authoritative copy stays in payload_json.
+                    ",".join(result.enrichment_providers),
+                    _dt_to_text(result.enriched_at) if result.enriched_at else None,
                     _to_json(result.to_dict()),
                     _dt_to_text(result.created_at),
                 ),
@@ -1254,6 +1259,8 @@ _ADDED_COLUMNS: dict[str, dict[str, str]] = {
         "latency_ms": "INTEGER",
         "analysis_source": "TEXT",
         "prompt_version": "TEXT",
+        "enrichment_providers": "TEXT",
+        "enriched_at": "TEXT",
     },
 }
 
@@ -1364,6 +1371,8 @@ CREATE TABLE IF NOT EXISTS triage_results (
     latency_ms INTEGER,
     analysis_source TEXT,
     prompt_version TEXT,
+    enrichment_providers TEXT,
+    enriched_at TEXT,
     payload_json TEXT NOT NULL,
     created_at TEXT NOT NULL
 );

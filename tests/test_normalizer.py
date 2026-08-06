@@ -13,6 +13,7 @@ validate field extraction without requiring live Wazuh or Security Onion.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import Path
 
 from soc.models import AlertSeverity, EventSource, RawEvent
 from soc.normalizer import (
@@ -23,6 +24,7 @@ from soc.normalizer import (
     severity_from_text_or_number,
     severity_from_wazuh_level,
 )
+from soc.replay import load_replay_file
 
 
 def _pf_raw_event(payload: dict) -> RawEvent:
@@ -604,3 +606,89 @@ def test_naive_timestamp_is_converted_to_utc():
     alert = Normalizer().normalize(event)
 
     assert alert.timestamp == datetime(2026, 6, 10, 17, 0, tzinfo=UTC)
+
+def test_windows_wazuh_event_fields_are_read_from_the_data_prefix():
+    """Real Wazuh alerts nest Windows eventdata under `data.win.eventdata.*`.
+
+    The path list only had the unprefixed `win.eventdata.*`, so `user`,
+    `process_name` and `command_line` were `None` for every Windows event — the
+    repo's own `sample_wazuh_alert.json` included. Nothing failed: the fields are
+    optional, so the loss was silent, and `score_alert_locally`'s keyword search
+    never saw a command line on Windows at all.
+    """
+
+    events = load_replay_file(Path("tests/fixtures/sample_wazuh_alert.json"))
+    alert = Normalizer().normalize_many(events)[0]
+
+    assert alert.user == "alice"
+    assert alert.command_line is not None
+    assert "encodedcommand" in alert.command_line.lower()
+
+
+def test_suricata_severity_is_read_from_the_eve_path():
+    """A real Suricata EVE document nests alert fields under `suricata.eve.alert.*`.
+
+    Reading only `suricata.alert.*` left `source_severity` as None, so
+    `severity_from_security_onion` was never consulted and a Suricata severity 1
+    normalized to UNKNOWN. Every Suricata detection was therefore scored on an
+    unknown-severity base rather than a high one.
+    """
+
+    events = load_replay_file(Path("tests/fixtures/sample_so_alert.json"))
+    alert = Normalizer().normalize_many(events)[0]
+
+    assert alert.severity is AlertSeverity.HIGH
+
+
+def test_suricata_rule_name_comes_from_the_signature_not_the_message():
+    """The signature is the detection's identity; `message` is free text.
+
+    With the eve path missing, `rule_name` fell through to whatever free-text
+    field was available, which is not stable across Security Onion versions.
+    """
+
+    events = load_replay_file(Path("tests/fixtures/sample_so_alert.json"))
+    alert = Normalizer().normalize_many(events)[0]
+
+    assert alert.rule_name == "ET TROJAN Possible PowerShell Download Cradle"
+
+
+def test_windows_logon_type_is_extracted():
+    """A successful RDP logon is materially different from a network logon.
+
+    `logonType` is a real Windows field the normalizer never read, so local
+    scoring had no way to tell an interactive session on a server from a file
+    share access. Type 10 is RemoteInteractive.
+    """
+
+    events = load_replay_file(Path("tests/fixtures/labeled/events/ambiguous_rdp_from_unusual_subnet.json"))
+    alert = Normalizer().normalize_many(events)[0]
+
+    assert alert.logon_type == "10"
+
+
+def test_wazuh_fired_times_is_extracted():
+    """`firedtimes` is Wazuh's own count of how often a rule has fired.
+
+    That is a deployment baseline the product already computes and hands us. A
+    rule that has fired 15,726 times is describing routine activity on this
+    estate, and the scorer could not see it.
+    """
+
+    events = load_replay_file(Path("tests/fixtures/labeled/events/benign_fim_log_directory_churn.json"))
+    alert = Normalizer().normalize_many(events)[0]
+
+    assert alert.fired_times == 15726
+
+
+def test_transferred_bytes_are_extracted():
+    """Volume is the whole substance of an exfiltration alert.
+
+    Without it, an 8.79 GB egress and a 9 KB one are the same event to the
+    scorer.
+    """
+
+    events = load_replay_file(Path("tests/fixtures/labeled/events/serious_large_outbound_transfer.json"))
+    alerts = Normalizer().normalize_many(events)
+
+    assert max(alert.bytes_transferred or 0 for alert in alerts) > 8_000_000_000

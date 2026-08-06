@@ -1,0 +1,55 @@
+[
+  {
+    "id": "so-amb-nrd-001",
+    "source": "security_onion",
+    "timestamp": "2026-07-14T13:02:31Z",
+    "payload": {
+      "event": {
+        "id": "so-amb-nrd-001",
+        "module": "suricata",
+        "dataset": "suricata.eve",
+        "kind": "alert",
+        "category": "network"
+      },
+      "@timestamp": "2026-07-14T13:02:31Z",
+      "source": {
+        "ip": "10.0.3.88",
+        "port": 51422
+      },
+      "destination": {
+        "ip": "8.8.8.8",
+        "port": 443
+      },
+      "host": {
+        "name": "securityonion-sensor-01"
+      },
+      "network": {
+        "protocol": "tls",
+        "transport": "tcp",
+        "direction": "outbound"
+      },
+      "suricata": {
+        "eve": {
+          "event_type": "alert",
+          "alert": {
+            "signature_id": 2036000,
+            "signature": "ET INFO Observed DNS Query to a Newly Registered Domain",
+            "category": "Potentially Bad Traffic",
+            "severity": 2
+          },
+          "flow": {
+            "pkts_toserver": 21,
+            "pkts_toclient": 24,
+            "bytes_toserver": 3140,
+            "bytes_toclient": 8802
+          },
+          "tls": {
+            "sni": "cdn-assets-q3launch.click",
+            "version": "TLS 1.3"
+          }
+        }
+      },
+      "message": "ET INFO Observed DNS Query to a Newly Registered Domain (cdn-assets-q3launch.click) from 10.0.3.88"
+    }
+  }
+]

@@ -1,0 +1,46 @@
+[
+  {
+    "id": "wazuh-ssh-publickey-db-001",
+    "source": "wazuh",
+    "timestamp": "2026-08-05T09:03:19Z",
+    "payload": {
+      "id": "wazuh-ssh-publickey-db-001",
+      "timestamp": "2026-08-05T09:03:19Z",
+      "agent": {
+        "id": "019",
+        "name": "linux-db-03",
+        "ip": "10.0.1.90",
+        "os": {
+          "name": "Debian GNU/Linux",
+          "version": "12"
+        }
+      },
+      "manager": {
+        "name": "wazuh-manager-01"
+      },
+      "rule": {
+        "id": "5715",
+        "level": 3,
+        "description": "sshd: authentication success.",
+        "groups": [
+          "syslog",
+          "sshd",
+          "authentication_success"
+        ],
+        "firedtimes": 5104,
+        "mail": false
+      },
+      "decoder": {
+        "name": "sshd"
+      },
+      "location": "/var/log/auth.log",
+      "data": {
+        "srcip": "10.0.1.20",
+        "dstip": "10.0.1.90",
+        "srcport": "49881",
+        "dstuser": "dbadmin"
+      },
+      "full_log": "Aug  5 09:03:19 linux-db-03 sshd[4417]: Accepted publickey for dbadmin from 10.0.1.20 port 49881 ssh2: ED25519 SHA256:notarealkeyfingerprint"
+    }
+  }
+]

@@ -1,0 +1,166 @@
+[
+  {
+    "id": "wazuh-defender-disabled-001",
+    "source": "wazuh",
+    "timestamp": "2026-07-24T05:02:11Z",
+    "payload": {
+      "id": "wazuh-defender-disabled-001",
+      "timestamp": "2026-07-24T05:02:11Z",
+      "agent": {
+        "id": "014",
+        "name": "fin-ws-014",
+        "ip": "10.0.2.14",
+        "os": {
+          "name": "Windows 10 Enterprise"
+        }
+      },
+      "manager": {
+        "name": "wazuh-manager-01"
+      },
+      "rule": {
+        "id": "92500",
+        "level": 12,
+        "description": "Windows Defender real-time protection disabled via registry",
+        "groups": [
+          "windows",
+          "sysmon",
+          "defense_evasion"
+        ],
+        "mitre": {
+          "id": [
+            "T1562.001"
+          ],
+          "tactic": [
+            "Defense Evasion"
+          ],
+          "technique": [
+            "Disable or Modify Tools"
+          ]
+        }
+      },
+      "data": {
+        "win": {
+          "system": {
+            "providerName": "Microsoft-Windows-Sysmon",
+            "eventID": "13",
+            "computer": "fin-ws-014"
+          },
+          "eventdata": {
+            "image": "C:\\Windows\\System32\\reg.exe",
+            "targetObject": "HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows Defender\\DisableAntiSpyware",
+            "details": "DWORD (0x00000001)",
+            "subjectUserName": "SYSTEM"
+          }
+        },
+        "command": "reg.exe add \"HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows Defender\" /v DisableAntiSpyware /t REG_DWORD /d 1 /f",
+        "srcip": "10.0.2.14"
+      },
+      "full_log": "reg.exe set DisableAntiSpyware=1 on fin-ws-014, outside any change window"
+    }
+  },
+  {
+    "id": "wazuh-agent-service-stopped-002",
+    "source": "wazuh",
+    "timestamp": "2026-07-24T05:02:29Z",
+    "payload": {
+      "id": "wazuh-agent-service-stopped-002",
+      "timestamp": "2026-07-24T05:02:29Z",
+      "agent": {
+        "id": "014",
+        "name": "fin-ws-014",
+        "ip": "10.0.2.14",
+        "os": {
+          "name": "Windows 10 Enterprise"
+        }
+      },
+      "rule": {
+        "id": "92501",
+        "level": 12,
+        "description": "Security agent service stopped by a non-service-account process",
+        "groups": [
+          "windows",
+          "sysmon",
+          "defense_evasion"
+        ],
+        "mitre": {
+          "id": [
+            "T1562.001",
+            "T1489"
+          ],
+          "tactic": [
+            "Defense Evasion",
+            "Impact"
+          ],
+          "technique": [
+            "Disable or Modify Tools",
+            "Service Stop"
+          ]
+        }
+      },
+      "data": {
+        "win": {
+          "system": {
+            "providerName": "Microsoft-Windows-Sysmon",
+            "eventID": "1",
+            "computer": "fin-ws-014"
+          },
+          "eventdata": {
+            "image": "C:\\Windows\\System32\\sc.exe",
+            "commandLine": "sc.exe stop WazuhSvc",
+            "parentImage": "C:\\Users\\Public\\svchost32.exe",
+            "subjectUserName": "SYSTEM"
+          }
+        },
+        "command": "sc.exe stop WazuhSvc",
+        "srcip": "10.0.2.14"
+      },
+      "full_log": "sc.exe stop WazuhSvc executed on fin-ws-014, parent process C:\\Users\\Public\\svchost32.exe"
+    }
+  },
+  {
+    "id": "wazuh-agent-disconnected-003",
+    "source": "wazuh",
+    "timestamp": "2026-07-24T05:03:04Z",
+    "payload": {
+      "id": "wazuh-agent-disconnected-003",
+      "timestamp": "2026-07-24T05:03:04Z",
+      "agent": {
+        "id": "014",
+        "name": "fin-ws-014",
+        "ip": "10.0.2.14",
+        "os": {
+          "name": "Windows 10 Enterprise"
+        }
+      },
+      "manager": {
+        "name": "wazuh-manager-01"
+      },
+      "rule": {
+        "id": "503",
+        "level": 9,
+        "description": "Wazuh agent stopped reporting while the host remained reachable on the network",
+        "groups": [
+          "ossec",
+          "agent_stopped",
+          "defense_evasion"
+        ],
+        "mitre": {
+          "id": [
+            "T1562.001"
+          ],
+          "tactic": [
+            "Defense Evasion"
+          ],
+          "technique": [
+            "Disable or Modify Tools"
+          ]
+        }
+      },
+      "data": {
+        "srcip": "10.0.2.14",
+        "status": "disconnected"
+      },
+      "full_log": "ossec: Agent stopped: 'fin-ws-014->10.0.2.14'. Host still answering ICMP and RDP from the manager."
+    }
+  }
+]

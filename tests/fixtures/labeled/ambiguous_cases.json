@@ -1,0 +1,125 @@
+{
+  "_note": "SYNTHETIC MID-BAND SET (Milestone 2.5). Twelve deliberately ambiguous cases: each one has a credible benign explanation and a credible malicious explanation, and the label records the band a competent analyst could defend from the evidence in the fixture alone. Bands and actions were written from security judgment BEFORE any scorer was run, and were not adjusted afterwards - where the scorer disagrees, that is a finding about the scorer, not a label to move. Most records list more than one acceptable action on purpose: pretending a single answer is correct for a genuinely ambiguous alert is what makes an evaluation set lie. Provenance is synthetic, so this set measures self-consistency, not accuracy; only analyst-reviewed labels support an accuracy claim.",
+  "cases": [
+    {
+      "id": "ambiguous-internal-ssh-failed-burst",
+      "provenance": "synthetic",
+      "fixture": "tests/fixtures/labeled/events/ambiguous_internal_ssh_failed_burst.json",
+      "expected_score_min": 4,
+      "expected_score_max": 6,
+      "expected_actions": ["queue_review"],
+      "expected_classification": "medium",
+      "rationale": "Four failed sshd password attempts for the service account svc_backup from one internal host to one database server in 92 seconds. The near-uniform 30-second spacing and the single fixed target look exactly like a service whose stored credential expired and whose retry timer is firing, which is the most common cause of this pattern; the same shape is also the opening of credential-based lateral movement using a harvested service account. Deterministic retry timing and a single destination argue benign, but a service account authenticating with a password at all is itself a weakness. Resolved either way by whether svc_backup has a legitimate job against 10.0.1.20, whether any attempt later succeeded, and whether the same source is failing against other hosts."
+    },
+    {
+      "id": "ambiguous-admin-group-addition",
+      "provenance": "synthetic",
+      "fixture": "tests/fixtures/labeled/events/ambiguous_admin_group_addition.json",
+      "expected_score_min": 4,
+      "expected_score_max": 7,
+      "expected_actions": ["queue_review"],
+      "expected_classification": null,
+      "rationale": "A helpdesk account adds a staff user to Server Operators on a domain controller at 14:22 local time. Privileged group membership is the single highest-leverage change an attacker makes after gaining a foothold, and Server Operators is effectively a path to domain compromise, so the impact ceiling is high; but this is also the most routine action an IT helpdesk performs, during business hours, by an account whose job is exactly this. The event alone cannot separate the two. Resolved by a matching change ticket and by whether helpdesk_tsmith's own session was itself normal - a recent impossible-travel or new-device logon for that helpdesk account would flip this to a page."
+    },
+    {
+      "id": "ambiguous-powershell-github-fetch",
+      "provenance": "synthetic",
+      "fixture": "tests/fixtures/labeled/events/ambiguous_powershell_github_fetch.json",
+      "expected_score_min": 5,
+      "expected_score_max": 7,
+      "expected_actions": ["queue_review"],
+      "expected_classification": "medium",
+      "rationale": "PowerShell downloads a script from raw.githubusercontent.com to the user's temp directory and dot-sources it. raw.githubusercontent.com is a legitimate host that attackers favour precisely because it is allowlisted almost everywhere, so domain reputation contributes nothing here and the download-then-execute pattern is the whole signal. The parent process is VS Code and the working directory is the user's source tree, which is strong evidence of a developer running a setup script; the same command line with a different parent would be a straightforward stage-one loader. Resolved by fetching the script content, checking whether that GitHub organisation is one the company actually uses, and whether this endpoint is a developer workstation."
+    },
+    {
+      "id": "ambiguous-off-hours-login-success",
+      "provenance": "synthetic",
+      "fixture": "tests/fixtures/labeled/events/ambiguous_off_hours_login_success.json",
+      "expected_score_min": 3,
+      "expected_score_max": 5,
+      "expected_actions": ["mark_likely_benign", "queue_review"],
+      "expected_classification": null,
+      "rationale": "A successful Kerberos network logon for a finance user against the finance file server at 03:12, from that user's own usual workstation. Unusual hour is the weakest of the classic anomaly signals: month-end close, travel across time zones, a scheduled sync running under the user's context, or simple insomnia all produce it, and the source workstation being the user's normal one removes most of the suspicion. It stays worth a glance because off-hours access to finance data is also what account takeover looks like once the attacker is on the right host. Resolved by that account's historical logon-hour baseline and by what was accessed on the share afterwards; either action is defensible, which is why both are listed."
+    },
+    {
+      "id": "ambiguous-rdp-from-unusual-subnet",
+      "provenance": "synthetic",
+      "fixture": "tests/fixtures/labeled/events/ambiguous_rdp_from_unusual_subnet.json",
+      "expected_score_min": 4,
+      "expected_score_max": 7,
+      "expected_actions": ["queue_review"],
+      "expected_classification": null,
+      "rationale": "A successful RemoteInteractive (RDP) logon to a production ERP server from a host in the lab subnet, a source this user does not normally originate from. Interactive RDP into production is the textbook lateral-movement step, and lab subnets are a common staging ground because they are less monitored and more likely to be shared; equally, an engineer using a lab jump box to reach ERP is entirely ordinary and source-subnet novelty alone is a weak indicator. Resolved by whether mokafor has any history from 10.0.9.0/24, whether the lab host is shared, and whether the RDP session was preceded by failed logons or followed by privileged activity on the ERP server."
+    },
+    {
+      "id": "ambiguous-dns-txt-query-burst",
+      "provenance": "synthetic",
+      "fixture": "tests/fixtures/labeled/events/ambiguous_dns_txt_query_burst.json",
+      "expected_score_min": 4,
+      "expected_score_max": 7,
+      "expected_actions": ["queue_review"],
+      "expected_classification": null,
+      "rationale": "Repeated TXT-record queries from one workstation for sequentially-labelled subdomains of a single non-corporate zone. TXT is the standard carrier for DNS-tunnelled command and control and for exfiltration over a channel almost no firewall blocks; it is also how SPF/DKIM/DMARC checkers, ACME certificate validation, and several license and telemetry clients legitimately work. The sequential labels are the interesting part - they fit both a chunked tunnel and a paged tooling lookup - and the low query volume here fits neither strongly. Resolved by subdomain-label entropy and length, whether the pattern persists for hours rather than seconds, the response sizes, and which process on 10.0.3.61 is issuing the queries."
+    },
+    {
+      "id": "ambiguous-newly-registered-domain-outbound",
+      "provenance": "synthetic",
+      "fixture": "tests/fixtures/labeled/events/ambiguous_newly_registered_domain_outbound.json",
+      "expected_score_min": 3,
+      "expected_score_max": 6,
+      "expected_actions": ["queue_review", "mark_likely_benign"],
+      "expected_classification": null,
+      "rationale": "One outbound TLS session from a workstation to a newly-registered domain in a low-cost TLD, with a CDN-flavoured SNI and a small, symmetric flow. Domain age is a genuine risk multiplier because phishing and C2 infrastructure is usually days old, but on its own it is a very weak signal: marketing campaigns, product launches, and CDN churn register new names constantly, and a single short session with no follow-on traffic is not beaconing. This sits right on the suppress/review boundary, hence both actions. Resolved by the actual WHOIS age and registrar, whether the workstation returns to the domain on an interval, what process opened the connection, and whether any other host in the estate has ever contacted it."
+    },
+    {
+      "id": "ambiguous-new-service-installed",
+      "provenance": "synthetic",
+      "fixture": "tests/fixtures/labeled/events/ambiguous_new_service_installed.json",
+      "expected_score_min": 4,
+      "expected_score_max": 6,
+      "expected_actions": ["queue_review"],
+      "expected_classification": "medium",
+      "rationale": "A new auto-start service running as LocalSystem is installed on a production ERP server at 19:47 by a deployment account. Service installation is the most durable and most commonly abused Windows persistence mechanism, and LocalSystem plus auto-start is exactly what an attacker wants; it is simultaneously how every legitimate agent, vendor tool, and patch deploys. The vendor-looking Program Files path and the deployment service account both argue benign, and neither is hard for an attacker to imitate. Resolved by whether the install falls inside an approved change window, whether the binary is signed by the named vendor, and whether the same service appeared on peer servers as part of the same rollout."
+    },
+    {
+      "id": "ambiguous-pf-block-burst-single-source",
+      "provenance": "synthetic",
+      "fixture": "tests/fixtures/labeled/events/ambiguous_pf_block_burst_single_source.json",
+      "expected_score_min": 2,
+      "expected_score_max": 4,
+      "expected_actions": ["mark_likely_benign", "queue_review"],
+      "expected_classification": "low",
+      "rationale": "Six pf blocks in fourteen seconds from one external address, all against one internal host, walking a short list of remote-administration and database ports. Blocked traffic is the firewall working as configured and internet-facing perimeters see this continuously from untargeted internet-wide scanners, which is the benign reading. What makes it non-trivial is the shape: one destination and a curated high-value port list is closer to targeted reconnaissance than to broad scanning, and reconnaissance against a specific host sometimes precedes a real attempt. The band stays low because nothing was permitted and no compromise is evidenced; this is context for correlation, not a detection. Resolved by whether the same source ever gets a pass, whether it returns, and whether other hosts saw the identical port sequence, which would indicate an indiscriminate scanner."
+    },
+    {
+      "id": "ambiguous-internal-port-scan",
+      "provenance": "synthetic",
+      "fixture": "tests/fixtures/labeled/events/ambiguous_internal_port_scan.json",
+      "expected_score_min": 5,
+      "expected_score_max": 7,
+      "expected_actions": ["queue_review"],
+      "expected_classification": null,
+      "rationale": "One internal host sweeps several server-subnet addresses on 445, 3389 and 22 within eight seconds, single-packet flows with no responses. Internal scanning is materially more serious than external scanning because the scanner is already inside the perimeter, and this port selection is the standard post-foothold discovery set. Against that, authorised vulnerability scanners and asset-inventory tools produce byte-identical traffic, and 02:05 is exactly when a scheduled scan would run. The deciding fact is not in the alerts at all. Resolved by whether 10.0.4.19 is the sanctioned scanner appliance, whether the sweep matches a scheduled job's window and target list, and whether the scan is followed by authentication attempts rather than stopping at discovery."
+    },
+    {
+      "id": "ambiguous-password-change-after-failures",
+      "provenance": "synthetic",
+      "fixture": "tests/fixtures/labeled/events/ambiguous_password_change_after_failures.json",
+      "expected_score_min": 4,
+      "expected_score_max": 7,
+      "expected_actions": ["queue_review"],
+      "expected_classification": null,
+      "rationale": "Three bad-password failures for one user from that user's own workstation, then a self-service password change from the same host three minutes later. The overwhelmingly common explanation is a user who forgot their password after a rotation and reset it, and the consistent single source supports that. The concerning reading is an attacker who guessed or replayed the credential and then changed it, which both locks the owner out and establishes persistence - the sequence is the same either way, and the self-change is what makes it worth queueing rather than suppressing. Resolved by whether a successful logon sat between the failures and the change, whether the real user reported a lockout, and whether the workstation shows any other suspicious activity in that window."
+    },
+    {
+      "id": "ambiguous-temp-archive-read-over-network",
+      "provenance": "synthetic",
+      "fixture": "tests/fixtures/labeled/events/ambiguous_temp_archive_read_over_network.json",
+      "expected_score_min": 5,
+      "expected_score_max": 8,
+      "expected_actions": ["queue_review", "page_now"],
+      "expected_classification": null,
+      "rationale": "7-Zip writes an archive into a user's temp directory at 21:14 and six minutes later that exact file is read over the administrative C$ share from a different internal host. Stage-then-collect is the canonical exfiltration preparation pattern, and the use of C$ rather than a normal file share plus the out-of-hours timing both push it upward; the same two events also describe an engineer bundling project files and pulling them to another machine, or a support tool collecting diagnostics. This is the highest-scoring case in this set because two correlated stages are much harder to dismiss than either alone, and it is the one where paging is genuinely defensible. Resolved by the archive's contents and size, whether the reading host is one the user controls, and whether the file subsequently leaves the network."
+    }
+  ]
+}

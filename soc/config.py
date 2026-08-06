@@ -34,6 +34,9 @@ from soc.wazuh_indexer_client import INDEXER_ALERT_SOURCE
 
 DEFAULT_ENV_FILE: Final[Path] = Path(".env")
 
+SUPPORTED_DEDUP_STORE: Final[str] = "sqlite"
+"""The only dedup store this build implements. See `_get_dedup_store`."""
+
 
 class ConfigError(ValueError):
     """Raised when required configuration is missing or invalid."""
@@ -115,9 +118,12 @@ class Settings:
     slack_webhook_url: str
 
     # Storage settings
+    # Only "sqlite" is implemented. Any other value is rejected at load time by
+    # _get_dedup_store rather than accepted and ignored: a Redis dedup store was
+    # deferred indefinitely, and silently running SQLite dedup for an operator
+    # who asked for a shared one is the failure mode that matters here.
     dedup_store: str
     sqlite_db_path: Path
-    redis_url: str
     dedup_ttl_hours: int
 
     # Replay/testing settings
@@ -524,9 +530,8 @@ def _load_settings_from_env() -> Settings:
         email_to=_get_str("EMAIL_TO", ""),
         email_use_tls=_get_bool("EMAIL_USE_TLS", True),
         slack_webhook_url=_get_str("SLACK_WEBHOOK_URL", ""),
-        dedup_store=_get_str("DEDUP_STORE", "sqlite"),
+        dedup_store=_get_dedup_store(),
         sqlite_db_path=_get_path("SQLITE_DB_PATH", "ai_soc.db"),
-        redis_url=_get_str("REDIS_URL", "redis://localhost:6379/0"),
         dedup_ttl_hours=_get_int("DEDUP_TTL_HOURS", 24, minimum=1),
         enable_sample_replay=_get_bool("ENABLE_SAMPLE_REPLAY", False),
         sample_replay_file=_get_path(
@@ -643,6 +648,35 @@ def _get_bool(name: str, default: bool) -> bool:
     raise ConfigError(
         f"{name} must be a boolean value such as true/false, yes/no, or 1/0"
     )
+
+
+def _get_dedup_store() -> str:
+    """Read DEDUP_STORE and reject any store this build cannot provide.
+
+    Validated at load time rather than through an opt-in validator because
+    dedup is not an optional subsystem: every run uses it, so there is no path
+    on which an unsupported value would be caught later. The default is the
+    supported value, so an empty environment still loads.
+
+    Inputs:
+        None. Reads DEDUP_STORE from the environment.
+
+    Outputs:
+        The dedup store name, always `SUPPORTED_DEDUP_STORE`.
+
+    Raises:
+        ConfigError: If a store other than SQLite is requested.
+    """
+
+    value = _get_str("DEDUP_STORE", SUPPORTED_DEDUP_STORE).strip().lower()
+    if value != SUPPORTED_DEDUP_STORE:
+        raise ConfigError(
+            f"DEDUP_STORE={value!r} is not supported: the only implemented dedup store is "
+            f"{SUPPORTED_DEDUP_STORE!r} (a Redis-backed store was deferred indefinitely, since "
+            "SQLite is sufficient at this alert volume). "
+            f"Set DEDUP_STORE={SUPPORTED_DEDUP_STORE} or remove the variable."
+        )
+    return value
 
 
 def _get_path(name: str, default: str) -> Path:

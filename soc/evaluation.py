@@ -184,12 +184,17 @@ class CaseScore:
         action: Action triage produced.
         prompt_version: Prompt version that produced the score, or None for local.
         model: Model that produced the score, or None for local.
+        candidates_scored: How many incident candidates the case's fixture
+            clustered into. More than one means the case spans more than one
+            clustering window and was scored on its worst candidate rather than
+            as a single incident.
     """
 
     score: int
     action: TriageAction
     prompt_version: str | None = None
     model: str | None = None
+    candidates_scored: int = 1
 
     @classmethod
     def from_scorer_result(cls, result: Any) -> CaseScore:
@@ -226,6 +231,7 @@ class CaseOutcome:
         score_error: Distance outside the expected band, zero when in band.
         prompt_version: Prompt version that produced the score, or None for local.
         model: Model that produced the score, or None for local.
+        candidates_scored: Number of candidates the fixture clustered into.
     """
 
     case: LabeledCase
@@ -236,6 +242,18 @@ class CaseOutcome:
     score_error: int
     prompt_version: str | None = None
     model: str | None = None
+    candidates_scored: int = 1
+
+    @property
+    def was_split(self) -> bool:
+        """Return whether this case's fixture clustered into several candidates.
+
+        A split case is scored on its worst candidate, so no evidence is
+        dropped, but it is not the single incident the label describes. That
+        difference has to stay visible.
+        """
+
+        return self.candidates_scored > 1
 
     @property
     def is_missed_true_positive(self) -> bool:
@@ -304,6 +322,16 @@ class EvaluationReport:
         """Return benign cases scored high enough to page."""
 
         return [outcome for outcome in self.outcomes if outcome.is_noise]
+
+    @property
+    def split_cases(self) -> list[CaseOutcome]:
+        """Return cases whose fixture clustered into more than one candidate.
+
+        Reported so "we scored this as one incident" and "we scored the worst of
+        several fragments" cannot look identical in a run summary.
+        """
+
+        return [outcome for outcome in self.outcomes if outcome.was_split]
 
     @property
     def benign_caught_rate(self) -> float:
@@ -387,6 +415,13 @@ class EvaluationReport:
                 for (expected, actual), count in sorted(self.action_confusion.items())
             },
             "provenance_counts": dict(self.provenance_counts),
+            # Cases whose fixture spans more than one clustering window, mapped
+            # to how many candidates they became. Scored on the worst candidate,
+            # so nothing is dropped, but the fixture or the window still wants
+            # correcting: this is not the single incident the label describes.
+            "split_cases": {
+                outcome.case.id: outcome.candidates_scored for outcome in self.split_cases
+            },
             # Comparison keys: two runs are only comparable when these match.
             "prompt_versions": self._counts_of("prompt_version"),
             "models": self._counts_of("model"),
@@ -402,6 +437,7 @@ class EvaluationReport:
                     "action": outcome.action.value,
                     "in_band": outcome.in_band,
                     "action_agreed": outcome.action_agreed,
+                    "candidates_scored": outcome.candidates_scored,
                     "prompt_version": outcome.prompt_version,
                     "model": outcome.model,
                 }
@@ -710,6 +746,7 @@ def evaluate_cases(
                 score_error=case.score_error(scored.score),
                 prompt_version=scored.prompt_version,
                 model=scored.model,
+                candidates_scored=scored.candidates_scored,
             )
         )
         key = case.provenance.value
@@ -724,6 +761,16 @@ def _build_triage_scorer(engine: TriageEngine) -> Callable[[LabeledCase], CaseSc
     A fixture yielding one event is scored as an alert; several events are
     clustered first and scored as an incident candidate, which is how the
     pipeline would handle them.
+
+    A fixture whose events span longer than `ClusteringConfig.time_window_minutes`
+    clusters into several candidates. Every candidate is scored and the highest
+    score is the case's score: a label states what the *incident* deserves, so
+    scoring only the first candidate would judge the case on a fraction of the
+    evidence it describes, and taking the maximum cannot lose the strongest
+    signal. It is still not the same as scoring one incident — correlation
+    across the fragments is lost — so the split is recorded on the CaseScore and
+    reported, rather than being an error that would make a legitimate window
+    change unmeasurable.
 
     Inputs:
         engine: Triage engine to score with.
@@ -747,17 +794,23 @@ def _build_triage_scorer(engine: TriageEngine) -> Callable[[LabeledCase], CaseSc
         if len(alerts) == 1:
             alert = alerts[0]
             result = engine.triage_alert(alert, enricher.enrich_alert(alert))
+            candidates_scored = 1
         else:
             candidates = clusterer.cluster(alerts)
             if not candidates:
                 raise EvaluationError(f"Labeled case {case.id} produced no candidate")
-            candidate = candidates[0]
-            result = engine.triage_candidate(candidate, enricher.enrich_candidate(candidate))
+            results = [
+                engine.triage_candidate(candidate, enricher.enrich_candidate(candidate))
+                for candidate in candidates
+            ]
+            result = max(results, key=lambda scored: scored.score)
+            candidates_scored = len(candidates)
         return CaseScore(
             score=result.score,
             action=result.action,
             prompt_version=result.prompt_version,
             model=result.model,
+            candidates_scored=candidates_scored,
         )
 
     return _score

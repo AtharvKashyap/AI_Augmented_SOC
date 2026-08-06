@@ -1,0 +1,133 @@
+[
+  {
+    "id": "serious-lsass-credential-dump",
+    "provenance": "synthetic",
+    "fixture": "tests/fixtures/labeled/events/serious_lsass_credential_dump.json",
+    "expected_score_min": 8,
+    "expected_score_max": 10,
+    "expected_actions": ["page_now"],
+    "expected_classification": "high",
+    "rationale": "rundll32.exe opening lsass.exe with GrantedAccess 0x1010 and a call trace through comsvcs.dll is the canonical MiniDump credential-dumping pattern; nothing legitimate on a finance workstation reads LSASS process memory that way. If credentials left this host, every account that has logged into it is now suspect, so containment cannot wait for the morning shift."
+  },
+  {
+    "id": "serious-encoded-powershell-outbound",
+    "provenance": "synthetic",
+    "fixture": "tests/fixtures/labeled/events/serious_encoded_powershell_outbound.json",
+    "expected_score_min": 9,
+    "expected_score_max": 10,
+    "expected_actions": ["page_now"],
+    "expected_classification": "high",
+    "rationale": "Encoded PowerShell alone is ambiguous, but here Word is the parent process, the window is hidden, and seventeen seconds later Suricata and the firewall independently confirm the same host fetching a .ps1 from a public address with an HTTP 200. Three sensors describing one macro-to-stager chain removes the usual 'it is just admin tooling' explanation."
+  },
+  {
+    "id": "serious-ransomware-mass-encryption",
+    "provenance": "synthetic",
+    "fixture": "tests/fixtures/labeled/events/serious_ransomware_mass_encryption.json",
+    "expected_score_min": 9,
+    "expected_score_max": 10,
+    "expected_actions": ["page_now"],
+    "expected_classification": "high",
+    "rationale": "Shadow copies deleted, then 1842 files on a finance share renamed to .lckd inside sixty seconds, then a ransom note dropped. This is active encryption in progress on a file server, and unlike almost every other case in the set the cost of a delayed response rises every minute the host stays online."
+  },
+  {
+    "id": "serious-bruteforce-then-success",
+    "provenance": "synthetic",
+    "fixture": "tests/fixtures/labeled/events/serious_bruteforce_then_success.json",
+    "expected_score_min": 8,
+    "expected_score_max": 10,
+    "expected_actions": ["page_now"],
+    "expected_classification": "high",
+    "rationale": "310 failed SSH attempts from one public address against an internet-facing bastion followed by an accepted password for 'deploy' from that same address is a successful brute force, not a noisy scan; the immediate sudo-to-root fetching a script over HTTP confirms the session is hostile. A failed-login burst alone would only be queue-worthy - the success is what makes it a page."
+  },
+  {
+    "id": "serious-webshell-in-webroot",
+    "provenance": "synthetic",
+    "fixture": "tests/fixtures/labeled/events/serious_webshell_in_webroot.json",
+    "expected_score_min": 8,
+    "expected_score_max": 10,
+    "expected_actions": ["page_now"],
+    "expected_classification": "high",
+    "rationale": "A PHP file whose contents begin with an eval of POST data, written into an uploads directory by the apache user rather than by a deployment process, is a web shell: unauthenticated remote code execution reachable from the internet and a persistence mechanism that survives patching the original flaw. Even as a single event it justifies waking someone up."
+  },
+  {
+    "id": "serious-et-trojan-c2-beacon",
+    "provenance": "synthetic",
+    "fixture": "tests/fixtures/labeled/events/serious_et_trojan_c2_beacon.json",
+    "expected_score_min": 8,
+    "expected_score_max": 10,
+    "expected_actions": ["page_now"],
+    "expected_classification": "high",
+    "rationale": "A Suricata severity 1 signature in the command-and-control category matching a Cobalt Strike beacon check-in, outbound from an internal host to a public address, on its 41st fixed-interval-with-jitter poll. Repetition rules out a one-off false positive: the host is already under someone else's control and the beacon is the operator's session."
+  },
+  {
+    "id": "serious-privileged-account-file-tampering",
+    "provenance": "synthetic",
+    "fixture": "tests/fixtures/labeled/events/serious_privileged_account_file_tampering.json",
+    "expected_score_min": 8,
+    "expected_score_max": 10,
+    "expected_actions": ["page_now"],
+    "expected_classification": "high",
+    "rationale": "A NOPASSWD:ALL line added to /etc/sudoers and a second UID 0 entry appended to /etc/passwd within half a minute, followed by /var/log/auth.log being truncated to zero bytes. Configuration management does not clear the audit log after itself; the log destruction is what turns a plausible change-window edit into an attacker establishing root persistence and covering the trail."
+  },
+  {
+    "id": "serious-new-admin-account-used",
+    "provenance": "synthetic",
+    "fixture": "tests/fixtures/labeled/events/serious_new_admin_account_used.json",
+    "expected_score_min": 7,
+    "expected_score_max": 10,
+    "expected_actions": ["page_now", "queue_review"],
+    "expected_classification": "high",
+    "rationale": "An account created on a domain controller at 23:41, added to Administrators seventeen seconds later, and used for an RDP logon a minute after that. The compressed timing is the signal - real provisioning does not use an account within eighty seconds of creating it. Both actions are listed because out-of-hours emergency provisioning by a genuine admin is a real, if less likely, explanation."
+  },
+  {
+    "id": "serious-credential-reuse-many-hosts",
+    "provenance": "synthetic",
+    "fixture": "tests/fixtures/labeled/events/serious_credential_reuse_many_hosts.json",
+    "expected_score_min": 7,
+    "expected_score_max": 10,
+    "expected_actions": ["page_now", "queue_review"],
+    "expected_classification": "high",
+    "rationale": "One credential authenticating to six distinct application, database and jump hosts inside four minutes from a single source is credential reuse for lateral movement, and the breadth means containment has to cover every host it touched. Listed with queue_review as well because a service account fanning out to a fixed host list is also the shape of a legitimate scheduled job, and an analyst who knows the baseline may resolve it quickly."
+  },
+  {
+    "id": "serious-large-outbound-transfer",
+    "provenance": "synthetic",
+    "fixture": "tests/fixtures/labeled/events/serious_large_outbound_transfer.json",
+    "expected_score_min": 8,
+    "expected_score_max": 10,
+    "expected_actions": ["page_now"],
+    "expected_classification": "high",
+    "rationale": "An 8.79 GB password-protected archive built from the Finance and HR shares, then 8.79 GB uploaded from that same host to a public address over 67 minutes at 03:00 with no prior egress baseline. Collection and exfiltration matching byte for byte is a data breach in progress, and the notification clock starts whether or not anyone is watching."
+  },
+  {
+    "id": "serious-security-agent-tampering",
+    "provenance": "synthetic",
+    "fixture": "tests/fixtures/labeled/events/serious_security_agent_tampering.json",
+    "expected_score_min": 8,
+    "expected_score_max": 10,
+    "expected_actions": ["page_now"],
+    "expected_classification": "high",
+    "rationale": "Defender real-time protection disabled by registry, then the Wazuh service stopped by a process running from C:\\Users\\Public, then the agent going silent while the host still answers on the network. Losing visibility is itself the emergency: every detection that would have fired next is now gone, so this must be handled while the host can still be reached rather than left in a queue."
+  },
+  {
+    "id": "serious-kerberoasting-ticket-requests",
+    "provenance": "synthetic",
+    "fixture": "tests/fixtures/labeled/events/serious_kerberoasting_ticket_requests.json",
+    "expected_score_min": 7,
+    "expected_score_max": 10,
+    "expected_actions": ["page_now", "queue_review"],
+    "expected_classification": "high",
+    "rationale": "23 RC4-HMAC service tickets for distinct user-account SPNs requested by one principal from one workstation in twelve seconds. Modern clients negotiate AES, so the downgrade plus the enumeration rate is a Kerberoasting harvest, and every returned ticket is now offline-crackable service-account material. queue_review is listed as defensible because the damage is deferred until a hash cracks rather than immediate.",
+    "_note": "The RC4 downgrade matters as much as the volume: a legitimate client requesting one RC4 ticket for a legacy service is normal, 23 distinct SPNs is not."
+  },
+  {
+    "id": "serious-exploit-success-public-service",
+    "provenance": "synthetic",
+    "fixture": "tests/fixtures/labeled/events/serious_exploit_success_public_service.json",
+    "expected_score_min": 9,
+    "expected_score_max": 10,
+    "expected_actions": ["page_now"],
+    "expected_classification": "high",
+    "rationale": "An OGNL injection RCE attempt against a public-facing portal that the server answered with HTTP 200, and four seconds later the JVM spawned /bin/sh to download and execute a payload. Internet-facing exploit attempts are constant background noise; a 200 plus a child shell means this one landed, which is initial access already achieved rather than attempted."
+  }
+]

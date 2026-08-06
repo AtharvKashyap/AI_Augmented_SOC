@@ -1,0 +1,58 @@
+[
+  {
+    "id": "wazuh-defender-update-001",
+    "source": "wazuh",
+    "timestamp": "2026-08-05T03:47:09Z",
+    "payload": {
+      "id": "wazuh-defender-update-001",
+      "timestamp": "2026-08-05T03:47:09Z",
+      "agent": {
+        "id": "011",
+        "name": "win-fin-07",
+        "ip": "10.0.2.37",
+        "os": {
+          "name": "Microsoft Windows 11 Enterprise",
+          "version": "10.0.22631"
+        }
+      },
+      "manager": {
+        "name": "wazuh-manager-01"
+      },
+      "rule": {
+        "id": "62125",
+        "level": 3,
+        "description": "Windows Defender: antimalware definitions updated successfully.",
+        "groups": [
+          "windows",
+          "windows_defender"
+        ],
+        "firedtimes": 1893,
+        "mail": false
+      },
+      "decoder": {
+        "name": "windows_eventchannel"
+      },
+      "location": "EventChannel",
+      "data": {
+        "win": {
+          "system": {
+            "providerName": "Microsoft-Windows-Windows Defender",
+            "eventID": "2000",
+            "channel": "Microsoft-Windows-Windows Defender/Operational",
+            "computer": "win-fin-07",
+            "severityValue": "INFORMATION",
+            "systemTime": "2026-08-05T03:47:09.4412031Z"
+          },
+          "eventdata": {
+            "newSecurityVersion": "1.435.812.0",
+            "previousSecurityVersion": "1.435.799.0",
+            "signatureType": "AntiVirus",
+            "updateType": "FullUpdate",
+            "sourcePath": "Microsoft Update Server"
+          }
+        }
+      },
+      "full_log": "Microsoft-Windows-Windows Defender: INFORMATION(2000): Microsoft Defender Antivirus signature version has been updated. Current Signature Version: 1.435.812.0, Previous Signature Version: 1.435.799.0, Update Source: Microsoft Update Server"
+    }
+  }
+]

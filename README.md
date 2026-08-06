@@ -159,7 +159,6 @@ LOG_DIR=logs
 SQLITE_DB_PATH=data/soc.db
 DEDUP_TTL_HOURS=24
 DEDUP_STORE=sqlite
-REDIS_URL=redis://localhost:6379/0
 
 # Testing in low-alert environments
 ENABLE_SAMPLE_REPLAY=false

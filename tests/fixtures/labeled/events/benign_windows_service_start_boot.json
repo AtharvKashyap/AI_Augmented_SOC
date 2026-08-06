@@ -1,0 +1,55 @@
+[
+  {
+    "id": "wazuh-service-running-001",
+    "source": "wazuh",
+    "timestamp": "2026-08-05T05:58:31Z",
+    "payload": {
+      "id": "wazuh-service-running-001",
+      "timestamp": "2026-08-05T05:58:31Z",
+      "agent": {
+        "id": "011",
+        "name": "win-fin-07",
+        "ip": "10.0.2.37",
+        "os": {
+          "name": "Microsoft Windows 11 Enterprise",
+          "version": "10.0.22631"
+        }
+      },
+      "manager": {
+        "name": "wazuh-manager-01"
+      },
+      "rule": {
+        "id": "60009",
+        "level": 3,
+        "description": "Windows service entered the running state.",
+        "groups": [
+          "windows",
+          "windows_system"
+        ],
+        "firedtimes": 8842,
+        "mail": false
+      },
+      "decoder": {
+        "name": "windows_eventchannel"
+      },
+      "location": "EventChannel",
+      "data": {
+        "win": {
+          "system": {
+            "providerName": "Service Control Manager",
+            "eventID": "7036",
+            "channel": "System",
+            "computer": "win-fin-07",
+            "severityValue": "INFORMATION",
+            "systemTime": "2026-08-05T05:58:31.0093311Z"
+          },
+          "eventdata": {
+            "param1": "Print Spooler",
+            "param2": "running"
+          }
+        }
+      },
+      "full_log": "Service Control Manager: INFORMATION(7036): The Print Spooler service entered the running state."
+    }
+  }
+]

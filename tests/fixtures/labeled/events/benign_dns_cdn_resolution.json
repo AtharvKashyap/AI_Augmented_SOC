@@ -1,0 +1,59 @@
+[
+  {
+    "id": "so-zeek-dns-cdn-001",
+    "source": "security_onion",
+    "timestamp": "2026-08-05T10:41:02Z",
+    "payload": {
+      "event": {
+        "id": "so-zeek-dns-cdn-001",
+        "module": "zeek",
+        "dataset": "zeek.dns",
+        "kind": "event",
+        "category": "network",
+        "severity": 4
+      },
+      "@timestamp": "2026-08-05T10:41:02Z",
+      "source": {
+        "ip": "10.0.2.37",
+        "port": 51044
+      },
+      "destination": {
+        "ip": "1.1.1.1",
+        "port": 53
+      },
+      "host": {
+        "name": "securityonion-sensor-01"
+      },
+      "network": {
+        "protocol": "dns",
+        "transport": "udp",
+        "direction": "outbound"
+      },
+      "dns": {
+        "question": {
+          "name": "e4467.dscb.akamaiedge.net",
+          "type": "A",
+          "registered_domain": "akamaiedge.net"
+        },
+        "answers": [
+          {
+            "data": "23.60.148.161",
+            "type": "A",
+            "ttl": 20
+          }
+        ],
+        "response_code": "NOERROR"
+      },
+      "zeek": {
+        "dns": {
+          "rcode_name": "NOERROR",
+          "rejected": false,
+          "AA": false,
+          "RD": true,
+          "RA": true
+        }
+      },
+      "message": "Zeek dns: e4467.dscb.akamaiedge.net A NOERROR from 10.0.2.37 via 1.1.1.1"
+    }
+  }
+]

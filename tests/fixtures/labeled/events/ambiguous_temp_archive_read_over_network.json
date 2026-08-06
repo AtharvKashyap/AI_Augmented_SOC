@@ -1,0 +1,116 @@
+[
+  {
+    "id": "wazuh-amb-archive-001",
+    "source": "wazuh",
+    "timestamp": "2026-07-14T21:14:08Z",
+    "payload": {
+      "id": "wazuh-amb-archive-001",
+      "timestamp": "2026-07-14T21:14:08Z",
+      "agent": {
+        "id": "042",
+        "name": "endpoint-42",
+        "ip": "10.0.3.42",
+        "os": {
+          "name": "Windows 11"
+        }
+      },
+      "manager": {
+        "name": "wazuh-manager-01"
+      },
+      "rule": {
+        "id": "61613",
+        "level": 6,
+        "description": "Sysmon - Event 11: Archive file created in a temporary directory.",
+        "groups": [
+          "windows",
+          "sysmon",
+          "sysmon_event_11"
+        ],
+        "mitre": {
+          "id": [
+            "T1560.001"
+          ],
+          "tactic": [
+            "Collection"
+          ],
+          "technique": [
+            "Archive via Utility"
+          ]
+        }
+      },
+      "data": {
+        "win": {
+          "system": {
+            "providerName": "Microsoft-Windows-Sysmon",
+            "eventID": "11",
+            "computer": "endpoint-42"
+          },
+          "eventdata": {
+            "subjectUserName": "lchen",
+            "image": "C:\\Program Files\\7-Zip\\7z.exe",
+            "targetFilename": "C:\\Users\\lchen\\AppData\\Local\\Temp\\proj-archive.7z",
+            "parentImage": "C:\\Windows\\System32\\cmd.exe"
+          }
+        },
+        "srcip": "10.0.3.42"
+      },
+      "full_log": "Sysmon event 11: 7z.exe created C:\\Users\\lchen\\AppData\\Local\\Temp\\proj-archive.7z on endpoint-42"
+    }
+  },
+  {
+    "id": "wazuh-amb-archive-002",
+    "source": "wazuh",
+    "timestamp": "2026-07-14T21:19:52Z",
+    "payload": {
+      "id": "wazuh-amb-archive-002",
+      "timestamp": "2026-07-14T21:19:52Z",
+      "agent": {
+        "id": "042",
+        "name": "endpoint-42",
+        "ip": "10.0.3.42",
+        "os": {
+          "name": "Windows 11"
+        }
+      },
+      "rule": {
+        "id": "60141",
+        "level": 5,
+        "description": "Windows: A network share object was accessed.",
+        "groups": [
+          "windows",
+          "windows_security",
+          "file_access"
+        ],
+        "mitre": {
+          "id": [
+            "T1039"
+          ],
+          "tactic": [
+            "Collection"
+          ],
+          "technique": [
+            "Data from Network Shared Drive"
+          ]
+        }
+      },
+      "data": {
+        "win": {
+          "system": {
+            "providerName": "Microsoft-Windows-Security-Auditing",
+            "eventID": "5145",
+            "computer": "endpoint-42"
+          },
+          "eventdata": {
+            "subjectUserName": "lchen",
+            "shareName": "\\\\*\\C$",
+            "relativeTargetName": "Users\\lchen\\AppData\\Local\\Temp\\proj-archive.7z",
+            "accessMask": "0x1",
+            "ipAddress": "10.0.9.207"
+          }
+        },
+        "srcip": "10.0.9.207"
+      },
+      "full_log": "Windows security event 5145: read access to Users\\lchen\\AppData\\Local\\Temp\\proj-archive.7z over \\\\*\\C$ from 10.0.9.207 by CORP\\lchen"
+    }
+  }
+]

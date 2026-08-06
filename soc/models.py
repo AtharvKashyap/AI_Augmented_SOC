@@ -244,6 +244,13 @@ class Alert:
         user: User involved in the event, if known.
         process_name: Process name involved in the alert, if known.
         command_line: Command line involved in the alert, if known.
+        logon_type: Source logon type when the event is an authentication.
+            Windows type 10 is RemoteInteractive (RDP), 3 is Network.
+        fired_times: How many times the source rule has fired on this deployment,
+            when reported. Wazuh's `rule.firedtimes` is a baseline the product
+            already computes for us.
+        bytes_transferred: Bytes moved by the connection this alert describes,
+            when known. Volume is the substance of an exfiltration alert.
         raw_event_id: ID of the stored RawEvent this alert came from.
         raw: Original source payload or selected source fields.
     """
@@ -263,6 +270,9 @@ class Alert:
     user: str | None = None
     process_name: str | None = None
     command_line: str | None = None
+    logon_type: str | None = None
+    fired_times: int | None = None
+    bytes_transferred: int | None = None
     raw_event_id: str | None = None
     raw: JsonDict = field(default_factory=dict)
 
@@ -453,6 +463,11 @@ class TriageResult:
         model: LLM model used for triage.
         latency_ms: LLM call latency, if recorded.
         token_usage: Token usage metadata, if available.
+        enrichment_providers: Providers whose intel informed this decision, sorted
+            and deduplicated. Empty means no enrichment applied, which is a
+            different fact from enrichment applying and finding nothing.
+        enriched_at: Latest enrichment lookup time behind this decision, or None
+            when none applied. Stale intel is a reason to distrust a decision.
         created_at: Local creation time.
     """
 
@@ -473,6 +488,8 @@ class TriageResult:
     token_usage: JsonDict = field(default_factory=dict)
     analysis_source: AnalysisSource = AnalysisSource.LOCAL
     prompt_version: str | None = None
+    enrichment_providers: list[str] = field(default_factory=list)
+    enriched_at: datetime | None = None
     created_at: datetime = field(default_factory=utc_now)
 
     def __post_init__(self) -> None:

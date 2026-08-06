@@ -1,0 +1,149 @@
+[
+  {
+    "id": "so-amb-intscan-001",
+    "source": "security_onion",
+    "timestamp": "2026-07-14T02:05:44Z",
+    "payload": {
+      "event": {
+        "id": "so-amb-intscan-001",
+        "module": "suricata",
+        "dataset": "suricata.eve",
+        "kind": "alert",
+        "category": "network"
+      },
+      "@timestamp": "2026-07-14T02:05:44Z",
+      "source": {
+        "ip": "10.0.4.19",
+        "port": 39114
+      },
+      "destination": {
+        "ip": "10.0.1.20",
+        "port": 445
+      },
+      "host": {
+        "name": "securityonion-sensor-01"
+      },
+      "network": {
+        "protocol": "tcp",
+        "transport": "tcp",
+        "direction": "internal"
+      },
+      "suricata": {
+        "eve": {
+          "event_type": "alert",
+          "alert": {
+            "signature_id": 2001569,
+            "signature": "ET SCAN Behavioral Unusual Port 445 traffic, Potential Scan or Infection",
+            "category": "Potentially Bad Traffic",
+            "severity": 2
+          },
+          "flow": {
+            "pkts_toserver": 1,
+            "pkts_toclient": 0,
+            "bytes_toserver": 74,
+            "bytes_toclient": 0
+          }
+        }
+      },
+      "message": "ET SCAN Behavioral Unusual Port 445 traffic from 10.0.4.19 across 10.0.1.0/24"
+    }
+  },
+  {
+    "id": "so-amb-intscan-002",
+    "source": "security_onion",
+    "timestamp": "2026-07-14T02:05:45Z",
+    "payload": {
+      "event": {
+        "id": "so-amb-intscan-002",
+        "module": "suricata",
+        "dataset": "suricata.eve",
+        "kind": "alert",
+        "category": "network"
+      },
+      "@timestamp": "2026-07-14T02:05:45Z",
+      "source": {
+        "ip": "10.0.4.19",
+        "port": 39140
+      },
+      "destination": {
+        "ip": "10.0.1.31",
+        "port": 3389
+      },
+      "host": {
+        "name": "securityonion-sensor-01"
+      },
+      "network": {
+        "protocol": "tcp",
+        "transport": "tcp",
+        "direction": "internal"
+      },
+      "suricata": {
+        "eve": {
+          "event_type": "alert",
+          "alert": {
+            "signature_id": 2002911,
+            "signature": "ET SCAN Potential RDP Scan Detected",
+            "category": "Attempted Information Leak",
+            "severity": 2
+          },
+          "flow": {
+            "pkts_toserver": 1,
+            "pkts_toclient": 0,
+            "bytes_toserver": 74,
+            "bytes_toclient": 0
+          }
+        }
+      },
+      "message": "ET SCAN Potential RDP Scan Detected from 10.0.4.19"
+    }
+  },
+  {
+    "id": "so-amb-intscan-003",
+    "source": "security_onion",
+    "timestamp": "2026-07-14T02:05:52Z",
+    "payload": {
+      "event": {
+        "id": "so-amb-intscan-003",
+        "module": "suricata",
+        "dataset": "suricata.eve",
+        "kind": "alert",
+        "category": "network"
+      },
+      "@timestamp": "2026-07-14T02:05:52Z",
+      "source": {
+        "ip": "10.0.4.19",
+        "port": 39288
+      },
+      "destination": {
+        "ip": "10.0.1.55",
+        "port": 22
+      },
+      "host": {
+        "name": "securityonion-sensor-01"
+      },
+      "network": {
+        "protocol": "tcp",
+        "transport": "tcp",
+        "direction": "internal"
+      },
+      "suricata": {
+        "eve": {
+          "event_type": "alert",
+          "alert": {
+            "signature_id": 2001219,
+            "signature": "ET SCAN Potential SSH Scan",
+            "category": "Attempted Information Leak",
+            "severity": 2
+          },
+          "flow": {
+            "pkts_toserver": 1,
+            "pkts_toclient": 0,
+            "bytes_toserver": 74,
+            "bytes_toclient": 0
+          }
+        }
+      },
+      "message": "ET SCAN Potential SSH Scan from 10.0.4.19"
+    }
+  }
+]

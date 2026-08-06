@@ -1,0 +1,62 @@
+[
+  {
+    "id": "wazuh-amb-svcinstall-001",
+    "source": "wazuh",
+    "timestamp": "2026-07-14T19:47:22Z",
+    "payload": {
+      "id": "wazuh-amb-svcinstall-001",
+      "timestamp": "2026-07-14T19:47:22Z",
+      "agent": {
+        "id": "011",
+        "name": "app-erp-01",
+        "ip": "10.0.1.55",
+        "os": {
+          "name": "Windows Server 2019"
+        }
+      },
+      "manager": {
+        "name": "wazuh-manager-01"
+      },
+      "rule": {
+        "id": "61138",
+        "level": 7,
+        "description": "Windows: Service Control Manager: A service was installed in the system.",
+        "groups": [
+          "windows",
+          "windows_system",
+          "service_installed",
+          "persistence"
+        ],
+        "mitre": {
+          "id": [
+            "T1543.003"
+          ],
+          "tactic": [
+            "Persistence"
+          ],
+          "technique": [
+            "Windows Service"
+          ]
+        }
+      },
+      "data": {
+        "win": {
+          "system": {
+            "providerName": "Service Control Manager",
+            "eventID": "7045",
+            "computer": "app-erp-01.corp.internal"
+          },
+          "eventdata": {
+            "serviceName": "ERPBatchAgent",
+            "imagePath": "C:\\Program Files\\ERPVendor\\agent\\erpbatchagent.exe --service",
+            "serviceType": "user mode service",
+            "startType": "auto start",
+            "accountName": "LocalSystem",
+            "subjectUserName": "svc_deploy"
+          }
+        }
+      },
+      "full_log": "Service Control Manager event 7045: service ERPBatchAgent installed on app-erp-01 by svc_deploy, auto start, running as LocalSystem"
+    }
+  }
+]
