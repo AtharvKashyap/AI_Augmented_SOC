@@ -1,0 +1,9 @@
+{
+  "name": "wazuh-host-deny",
+  "action": "wazuh_host_deny",
+  "required_confidence": 9,
+  "requires_confirmation": true,
+  "enabled": true,
+  "trigger_actions": ["page_now"],
+  "description": "Trigger Wazuh host-deny for a confirmed malicious source on one agent. Endpoint-impacting, so it demands the highest confidence band and a named approver, and the framework refuses it outright unless the score came from a model."
+}

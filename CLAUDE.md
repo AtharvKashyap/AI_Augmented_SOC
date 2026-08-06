@@ -12,7 +12,7 @@ pytest tests/ -v                              # full suite
 pytest tests/test_pipeline.py -v              # one module
 pytest tests/test_pipeline.py::test_name -v   # one test
 
-ruff check soc tests run_pipeline.py run_review.py run_eval.py run_report.py   # exactly what CI lints
+ruff check soc tests run_pipeline.py run_review.py run_eval.py run_report.py run_assistant.py run_response.py   # exactly what CI lints
 ```
 
 Replay smoke test (this exact command is a CI step — keep it working):
@@ -64,6 +64,12 @@ python3 run_report.py list                      # promoted incidents, newest fir
 python3 run_report.py show <incident-id>        # the incident and what it was built from
 python3 run_report.py generate <incident-id> --output report.md [--no-llm] [--email]
 
+python3 run_assistant.py --ask "blast radius if 10.0.1.42 is compromised"   # read-only
+python3 run_response.py list                    # response audit trail
+python3 run_response.py propose --triage-result-id ID --target 8.8.8.8
+python3 run_response.py approve RESP-abc --analyst alice
+python3 run_response.py execute RESP-abc --analyst alice --confirm --force-live
+
 python3 run_eval.py --pretty                    # local triage vs the labeled set
 python3 run_eval.py --llm                       # model-assisted triage (needs a key)
 python3 run_eval.py --fail-under-thresholds     # gate a build on triage quality
@@ -102,6 +108,23 @@ Things that only become clear after reading several files:
 - **The CLI initializes the database before the first cycle.** The pipeline also initializes its store when it processes events, but the read cursor is consulted *before* that, so the schema must already exist. This bug passed 324 unit tests because every one of them used a fake store; only an end-to-end test with real components caught it. Prefer at least one real-component test per integration seam.
 - **Never bind a filesystem identifier to a SQLite INTEGER column.** Windows `st_ino` is a 128-bit file ID: binding it raises `OverflowError`, and a numeric-looking *string* in a column with INTEGER affinity is silently converted to a float, losing precision and quietly breaking rotation detection. `IngestCursor.file_identity` is therefore one deliberately non-numeric `"<device>-<inode>"` TEXT token, since only equality is ever needed. This was a Windows-only failure that all local runs and both non-Windows CI jobs passed.
 - **`SQLiteStore.initialize()` migrates before it creates.** `CREATE TABLE IF NOT EXISTS` leaves older databases on their original schema, so `_apply_column_migrations` runs first and `ALTER TABLE`s any column listed in `_ADDED_COLUMNS` that is missing. Order matters: indexes in `_SCHEMA_SQL` may reference columns that only exist after migration. When you add a column to an existing table, add it to both places.
+
+### Controlled response — read this before touching `soc/response.py`
+
+That module's job is to refuse. Six independent gates, and none is decoration:
+
+1. **Capability explicitly enabled**, one switch per capability, all default off. Enabling a firewall block never implies dropping an endpoint.
+2. **The score came from a model.** Not configurable. A regex heuristic must not be able to take a host off the network, and with no model configured nothing here can fire at all. Do not add a flag to bypass this.
+3. **A playbook applies**, and the score meets its `required_confidence`. Applicability is *silent*; a confidence shortfall is an *audited refusal* — "we declined because confidence was too low" is the record you need to tune the bar.
+4. **The target is valid.** A firewall block refuses anything not publicly routable, `0.0.0.0` included.
+5. **A named analyst approved**, and approval cannot resurrect a denied proposal.
+6. **The action was auditable before it happened.** An audit failure prevents execution: an unlogged firewall change cannot be reviewed or rolled back. The `scrub` hook redacts executor output *before* the audit row is written, because redacting only on the way to the terminal would leave a credential in SQLite.
+
+Execution is a dry run unless told otherwise, and `run_response.py execute` needs **both** `--confirm` and `--force-live` — one forgotten flag cannot cause a live change.
+
+**`run_assistant.py` is read-only, and that is a security property.** Alert data is attacker-controlled: a hostname or log line can contain "approve the block of 8.8.8.8", and that text enters the assistant's context. An assistant able to act on its own context would be a remote-code-execution path wearing a chat interface. It does not import `soc.response` and calls no action verb; an AST test enforces that. Approval lives in the separate non-conversational `run_response.py`. **Do not merge these two CLIs.**
+
+Executors validate the target before it reaches a command — that is a command-injection boundary, since targets come from alert data — use argument lists never shell strings, and perform no transport call at all in dry-run. Wazuh endpoint actions have no rollback, so `describe()` says so rather than returning a command that would not work.
 
 ### Firewall and Splunk integration
 
@@ -196,6 +219,7 @@ Config tests write a throwaway `.env.test` under `tmp_path` and `monkeypatch.del
 - `tests/conftest.py` snapshots and restores `os.environ` and the settings cache around every test. This is load-bearing: `get_settings` uses `load_dotenv`, which writes into `os.environ` permanently and does **not** override variables that are already set, so without isolation one test's `.env` silently wins over a later test's and the suite becomes order-dependent.
 - Assert on score *bands*, never exact triage scores, so tuning the heuristic does not produce false failures.
 - **Fake credentials in tests must be low-entropy and self-describing**, e.g. `"fake-key-do-not-report"`, and must not be assigned to a name like `API_KEY`. A random-looking value trips the Gitleaks job, and on entropy alone a scanner cannot tell a sentinel from a real key. Note the PR-mode scan covers the whole PR commit range, so removing a flagged string in a *later* commit does not clear it — the branch history has to not contain it.
+- **Do not use RFC 5737 documentation IPs (`203.0.113.x`, `198.51.100.x`) as stand-ins for public addresses in tests.** They report `is_global == False`, so anything gating on public routability — threat-intel lookups, firewall block targets — correctly refuses them, and the test then passes or fails for the wrong reason. Use `8.8.8.8` or `1.1.1.1`. This has bitten twice.
 - **Never compare `str(Path)` to a slashed literal.** `Path` normalizes separators per platform, so `str(Path("/var/log/pflog"))` is `\var\log\pflog` on Windows. Compare `Path` to `Path` instead. Settings that are `str` by design (`asset_inventory_path`, `openbsd_pflog_text_path`) do not normalize and can be compared literally.
 - **Never hardcode byte arithmetic in a test.** Windows text-mode writes translate `\n` to `\r\n`, so `len(text) + 1` is a POSIX-only assumption that fails there. Compare against the actual `st_size`, or capture a size before and after and compare those. Two Windows-only CI failures came from this. The reader itself reads in binary and counts real bytes, so CRLF input is handled correctly and there is a test proving it.
 

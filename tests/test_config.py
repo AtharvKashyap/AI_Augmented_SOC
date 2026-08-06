@@ -437,3 +437,80 @@ def test_pflog_text_path_defaults_to_empty(tmp_path):
     env_file = _write_env_file(tmp_path, "OUTPUT_DIR=output")
 
     assert get_settings(env_file, reload=True).openbsd_pflog_text_path == ""
+
+
+def test_response_capabilities_are_all_disabled_by_default(tmp_path):
+    """Every response capability is off unless explicitly switched on.
+
+    A default-on response capability means a misconfigured deploy could change a
+    firewall or drop a host by itself.
+
+    Inputs:
+        tmp_path: Pytest temporary directory fixture.
+
+    Outputs:
+        None. Assertions verify each capability defaults to False.
+    """
+
+    settings = get_settings(_write_env_file(tmp_path, "OUTPUT_DIR=output"), reload=True)
+
+    assert settings.response_pf_block_enabled is False
+    assert settings.response_wazuh_firewall_drop_enabled is False
+    assert settings.response_wazuh_host_deny_enabled is False
+
+
+def test_each_response_capability_has_its_own_switch(tmp_path):
+    """Enabling one capability must never imply another.
+
+    Blocking an external address at the firewall and dropping an endpoint off the
+    network are different risks and need separate decisions.
+
+    Inputs:
+        tmp_path: Pytest temporary directory fixture.
+
+    Outputs:
+        None. Assertions verify the switches are independent.
+    """
+
+    settings = get_settings(
+        _write_env_file(tmp_path, "RESPONSE_PF_BLOCK_ENABLED=true"), reload=True
+    )
+
+    assert settings.response_pf_block_enabled is True
+    assert settings.response_wazuh_firewall_drop_enabled is False
+    assert settings.response_wazuh_host_deny_enabled is False
+
+
+def test_response_capability_lookup_matches_action_names(tmp_path):
+    """The gate asks by action type, so the mapping must cover every action.
+
+    Inputs:
+        tmp_path: Pytest temporary directory fixture.
+
+    Outputs:
+        None. Assertions verify lookup by action value.
+    """
+
+    from soc.response import ResponseActionType
+
+    settings = get_settings(
+        _write_env_file(tmp_path, "RESPONSE_WAZUH_HOST_DENY_ENABLED=true"), reload=True
+    )
+
+    assert settings.response_capability_enabled(ResponseActionType.WAZUH_HOST_DENY) is True
+    assert settings.response_capability_enabled(ResponseActionType.PF_BLOCK_IP) is False
+
+
+def test_playbook_directory_setting_defaults_to_playbooks(tmp_path):
+    """Playbooks live in a known place but must remain overridable.
+
+    Inputs:
+        tmp_path: Pytest temporary directory fixture.
+
+    Outputs:
+        None. Assertion verifies the default.
+    """
+
+    settings = get_settings(_write_env_file(tmp_path, "OUTPUT_DIR=output"), reload=True)
+
+    assert settings.playbook_dir == "playbooks"

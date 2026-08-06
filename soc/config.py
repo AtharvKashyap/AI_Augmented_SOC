@@ -26,7 +26,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final
+from typing import Any, Final
 
 from dotenv import load_dotenv
 
@@ -142,6 +142,13 @@ class Settings:
     # Path for the same reason as asset_inventory_path.
     openbsd_pflog_text_path: str
     openbsd_pf_block_table: str
+    # One switch per capability, all defaulting to False. Blocking an external
+    # address at the firewall and dropping an endpoint off the network are
+    # different risks, so enabling one must never imply another.
+    response_pf_block_enabled: bool
+    response_wazuh_firewall_drop_enabled: bool
+    response_wazuh_host_deny_enabled: bool
+    playbook_dir: str
 
     def ensure_directories(self) -> None:
         """Create local runtime directories if they do not already exist.
@@ -312,6 +319,27 @@ class Settings:
         _require_non_empty("OPENBSD_PF_USER", self.openbsd_pf_user)
         _require_non_empty("OPENBSD_PF_BLOCK_TABLE", self.openbsd_pf_block_table)
 
+    def response_capability_enabled(self, action: Any) -> bool:
+        """Return whether one response capability is switched on.
+
+        The response gate asks by action type, so this is the single place that
+        maps an action to its opt-in. An unknown action returns False: a
+        capability nobody has explicitly enabled must never be treated as enabled.
+
+        Inputs:
+            action: ResponseActionType, or its string value.
+
+        Outputs:
+            True only when that specific capability is enabled.
+        """
+
+        key = getattr(action, "value", action)
+        return {
+            "pf_block_ip": self.response_pf_block_enabled,
+            "wazuh_firewall_drop": self.response_wazuh_firewall_drop_enabled,
+            "wazuh_host_deny": self.response_wazuh_host_deny_enabled,
+        }.get(str(key), False)
+
     @property
     def report_model(self) -> str:
         """Return the configured report model, falling back to triage model.
@@ -466,6 +494,12 @@ def _load_settings_from_env() -> Settings:
         openbsd_pflog_path=_get_path("OPENBSD_PFLOG_PATH", "/var/log/pflog"),
         openbsd_pflog_text_path=_get_str("OPENBSD_PFLOG_TEXT_PATH", ""),
         openbsd_pf_block_table=_get_str("OPENBSD_PF_BLOCK_TABLE", "ai_soc_blocklist"),
+        response_pf_block_enabled=_get_bool("RESPONSE_PF_BLOCK_ENABLED", False),
+        response_wazuh_firewall_drop_enabled=_get_bool(
+            "RESPONSE_WAZUH_FIREWALL_DROP_ENABLED", False
+        ),
+        response_wazuh_host_deny_enabled=_get_bool("RESPONSE_WAZUH_HOST_DENY_ENABLED", False),
+        playbook_dir=_get_str("PLAYBOOK_DIR", "playbooks"),
     )
 
 
