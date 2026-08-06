@@ -61,6 +61,33 @@ class TriageError(ValueError):
     """Raised when triage input or output is invalid."""
 
 
+ESCALATING_LOGON_TYPES: dict[str, int] = {
+    # Windows logon types. 10 is RemoteInteractive (RDP) and 2 is Interactive: a
+    # human at a console. 3 (Network) and 5 (Service) are absent because they are
+    # the overwhelming majority of successful logons and carry no such weight.
+    "10": 2,
+    "2": 1,
+}
+"""Score boost per source logon type."""
+
+VOLUME_BOOST_THRESHOLDS: tuple[tuple[int, int], ...] = (
+    (5_000_000_000, 2),
+    (500_000_000, 1),
+)
+"""Bytes-transferred thresholds and their boosts, checked highest first.
+
+Deliberately coarse. These are magnitudes chosen to separate "a file" from "a
+filesystem", not tuned values — a real deployment with per-host baselines should
+replace this with a comparison against that baseline.
+"""
+
+ROUTINE_FIRED_TIMES = 1_000
+"""`rule.firedtimes` above which a rule is treated as describing routine activity.
+
+Wazuh computes this count itself. A rule that has fired a thousand times on one
+deployment is part of that estate's background, whatever its configured level.
+"""
+
 ASSET_CRITICALITY_BOOSTS: dict[str, int] = {
     "critical": 2,
     "high": 1,
@@ -125,6 +152,11 @@ ALERT_CONTEXT_FIELDS: tuple[str, ...] = (
     "user",
     "process_name",
     "command_line",
+    # Added deliberately: each distinguishes alerts the rule level cannot. Adding a
+    # field to the Alert model does not add it here.
+    "logon_type",
+    "fired_times",
+    "bytes_transferred",
 )
 
 RAW_CONTEXT_FIELDS: tuple[str, ...] = ("full_log",)
@@ -319,7 +351,7 @@ class TriageEngine:
             latency_ms = int((time.perf_counter() - started_at) * 1000)
             try:
                 parsed = parse_json_response_text(response_text)
-                return triage_result_from_llm_json(
+                result = triage_result_from_llm_json(
                     parsed,
                     target_id=target_id,
                     target_type=target_type,
@@ -328,6 +360,12 @@ class TriageEngine:
                     token_usage=token_usage,
                     prompt_version=TRIAGE_PROMPT_VERSION,
                 )
+                # The fallback was built from the same enrichments, so it already
+                # carries the audit trail. Copying it keeps the model path from
+                # having to re-derive provenance it was handed.
+                result.enrichment_providers = list(fallback_result.enrichment_providers)
+                result.enriched_at = fallback_result.enriched_at
+                return result
             except (OpenRouterError, TriageError, KeyError, TypeError, ValueError) as exc:
                 # An unparseable response is worth one more try: free models
                 # often wrap or truncate JSON, and dropping straight to local
@@ -487,6 +525,7 @@ def local_triage_alert(alert: Alert, enrichments: list[EnrichmentResult] | None 
     classification = _classification_from_score(score)
     summary = _local_alert_summary(alert, score, action)
 
+    providers, enriched_at = _enrichment_provenance(enrichments)
     return TriageResult(
         id=_build_triage_id(alert.id, "alert", score, classification),
         target_id=alert.id,
@@ -496,6 +535,8 @@ def local_triage_alert(alert: Alert, enrichments: list[EnrichmentResult] | None 
         classification=classification,
         action=action,
         summary=summary,
+        enrichment_providers=providers,
+        enriched_at=enriched_at,
     )
 
 
@@ -520,6 +561,9 @@ def local_triage_candidate(
     classification = _classification_from_score(score)
     summary = _local_candidate_summary(candidate, score, action)
 
+    providers, enriched_at = _enrichment_provenance(
+        enrichments if enrichments is not None else candidate.enrichments
+    )
     return TriageResult(
         id=_build_triage_id(candidate.id, "incident_candidate", score, classification),
         target_id=candidate.id,
@@ -529,6 +573,8 @@ def local_triage_candidate(
         classification=classification,
         action=action,
         summary=summary,
+        enrichment_providers=providers,
+        enriched_at=enriched_at,
     )
 
 
@@ -550,7 +596,10 @@ def score_alert_locally(alert: Alert, enrichments: list[EnrichmentResult] | None
     ).lower()
 
     high_risk_terms = ("mimikatz", "sekurlsa", "lsass", "credential", "c2", "trojan", "ransom")
-    medium_risk_terms = ("powershell", "encodedcommand", "-enc", "rundll32", "regsvr32", "mshta")
+    # "powershell" is deliberately absent: it is the default shell on Windows, so
+    # its presence is not a signal. Every term here indicates an attempt to obscure
+    # what is actually running, which is.
+    medium_risk_terms = ("encodedcommand", "-enc", "rundll32", "regsvr32", "mshta")
 
     if any(term in searchable for term in high_risk_terms):
         score += 2
@@ -559,8 +608,80 @@ def score_alert_locally(alert: Alert, enrichments: list[EnrichmentResult] | None
     if alert.dst_ip and not _is_private_ip(alert.dst_ip):
         score += 1
 
+    score += _logon_type_boost(alert)
+    score += _volume_boost(alert)
     score += _enrichment_score_boost(enrichments or [])
+    score += _frequency_damping(alert)
     return _clamp_score(score)
+
+
+def _logon_type_boost(alert: Alert) -> int:
+    """Return the score adjustment for how a session was established.
+
+    Windows logs every successful logon at the same rule level, so the level alone
+    cannot separate an interactive session on a server from a file-share access.
+    Without this, a successful RDP logon into production scored low enough to be
+    marked likely-benign, which means nobody looks again.
+
+    Inputs:
+        alert: Alert whose `logon_type` may be set.
+
+    Outputs:
+        Integer boost, 0 when the logon type is absent or unremarkable.
+    """
+
+    return ESCALATING_LOGON_TYPES.get(str(alert.logon_type or "").strip(), 0)
+
+
+def _volume_boost(alert: Alert) -> int:
+    """Return the score adjustment for how much data the alert describes moving.
+
+    Volume is the substance of an exfiltration alert: without it an 8.79 GB egress
+    and a 9 KB one are the same event, carrying the same rule and the same
+    addresses.
+
+    Inputs:
+        alert: Alert whose `bytes_transferred` may be set.
+
+    Outputs:
+        Integer boost, 0 when volume is unknown or ordinary.
+    """
+
+    transferred = alert.bytes_transferred
+    if not isinstance(transferred, int):
+        return 0
+    for threshold, boost in VOLUME_BOOST_THRESHOLDS:
+        if transferred >= threshold:
+            return boost
+    return 0
+
+
+def _frequency_damping(alert: Alert) -> int:
+    """Return the downward adjustment for a rule that fires constantly here.
+
+    Wazuh's `rule.firedtimes` is a deployment baseline the product already computes
+    for us. A rule that has fired thousands of times is describing routine activity
+    on this estate, and expected file-integrity churn in a log directory is the
+    canonical case: a real level-7 rule that is also noise.
+
+    **High and critical alerts are never damped.** Common is not the same as
+    harmless — brute-force and malware rules fire constantly on a real estate, so
+    damping by frequency alone would suppress exactly the detections that matter
+    most.
+
+    Inputs:
+        alert: Alert whose `fired_times` may be set.
+
+    Outputs:
+        Negative integer adjustment, or 0.
+    """
+
+    if alert.severity in (AlertSeverity.HIGH, AlertSeverity.CRITICAL):
+        return 0
+    fired = alert.fired_times
+    if isinstance(fired, int) and fired >= ROUTINE_FIRED_TIMES:
+        return -1
+    return 0
 
 
 def score_candidate_locally(
@@ -1125,6 +1246,34 @@ def _base_score_for_severity(severity: AlertSeverity) -> int:
         AlertSeverity.UNKNOWN: 3,
     }
     return mapping.get(severity, 3)
+
+
+def _enrichment_provenance(
+    enrichments: list[EnrichmentResult] | None,
+) -> tuple[list[str], Any]:
+    """Return the providers and latest lookup time behind a decision.
+
+    Milestone 3.5's audit requirement is about the *result*, not the inputs:
+    provider and lookup time already live on each EnrichmentResult, but reviewing a
+    stored decision months later meant guessing which intel it rested on, or
+    whether any applied at all. Sorted and deduplicated so the field can be diffed
+    between runs; two indicators enriched by one provider is one provider.
+
+    Inputs:
+        enrichments: Enrichment results that informed the decision, if any.
+
+    Outputs:
+        Tuple of sorted unique provider names and the latest lookup time, which is
+        None when no enrichment applied.
+    """
+
+    items = [item for item in (enrichments or []) if item is not None]
+    if not items:
+        return [], None
+
+    providers = sorted({str(item.provider) for item in items if getattr(item, "provider", None)})
+    times = [item.looked_up_at for item in items if getattr(item, "looked_up_at", None)]
+    return providers, (max(times) if times else None)
 
 
 def _enrichment_score_boost(enrichments: list[EnrichmentResult]) -> int:

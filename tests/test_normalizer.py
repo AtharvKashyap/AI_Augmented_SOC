@@ -651,3 +651,44 @@ def test_suricata_rule_name_comes_from_the_signature_not_the_message():
     alert = Normalizer().normalize_many(events)[0]
 
     assert alert.rule_name == "ET TROJAN Possible PowerShell Download Cradle"
+
+
+def test_windows_logon_type_is_extracted():
+    """A successful RDP logon is materially different from a network logon.
+
+    `logonType` is a real Windows field the normalizer never read, so local
+    scoring had no way to tell an interactive session on a server from a file
+    share access. Type 10 is RemoteInteractive.
+    """
+
+    events = load_replay_file(Path("tests/fixtures/labeled/events/ambiguous_rdp_from_unusual_subnet.json"))
+    alert = Normalizer().normalize_many(events)[0]
+
+    assert alert.logon_type == "10"
+
+
+def test_wazuh_fired_times_is_extracted():
+    """`firedtimes` is Wazuh's own count of how often a rule has fired.
+
+    That is a deployment baseline the product already computes and hands us. A
+    rule that has fired 15,726 times is describing routine activity on this
+    estate, and the scorer could not see it.
+    """
+
+    events = load_replay_file(Path("tests/fixtures/labeled/events/benign_fim_log_directory_churn.json"))
+    alert = Normalizer().normalize_many(events)[0]
+
+    assert alert.fired_times == 15726
+
+
+def test_transferred_bytes_are_extracted():
+    """Volume is the whole substance of an exfiltration alert.
+
+    Without it, an 8.79 GB egress and a 9 KB one are the same event to the
+    scorer.
+    """
+
+    events = load_replay_file(Path("tests/fixtures/labeled/events/serious_large_outbound_transfer.json"))
+    alerts = Normalizer().normalize_many(events)
+
+    assert max(alert.bytes_transferred or 0 for alert in alerts) > 8_000_000_000

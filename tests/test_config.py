@@ -600,3 +600,45 @@ def test_validate_splunk_search_requires_a_url_and_token(tmp_path):
 
     with pytest.raises(ConfigError, match="SPLUNK_SEARCH_URL"):
         settings.validate_splunk_search()
+
+
+def test_dedup_store_defaults_to_the_only_implemented_store(tmp_path, monkeypatch):
+    """With nothing configured, dedup runs on SQLite."""
+
+    monkeypatch.delenv("DEDUP_STORE", raising=False)
+    settings = get_settings(_write_env_file(tmp_path, ""), reload=True)
+
+    assert settings.dedup_store == "sqlite"
+
+
+def test_an_unimplemented_dedup_store_fails_loudly(tmp_path, monkeypatch):
+    """Requesting Redis dedup must fail, not silently downgrade to SQLite.
+
+    A key that reads cleanly and does nothing is the worst outcome here: the
+    operator believes dedup is shared across processes when it is not.
+    """
+
+    monkeypatch.delenv("DEDUP_STORE", raising=False)
+    env_file = _write_env_file(tmp_path, "DEDUP_STORE=redis")
+
+    with pytest.raises(ConfigError, match="DEDUP_STORE"):
+        get_settings(env_file, reload=True)
+
+
+def test_the_unsupported_dedup_store_message_names_the_supported_value(tmp_path, monkeypatch):
+    """The failure must say what to set instead."""
+
+    monkeypatch.delenv("DEDUP_STORE", raising=False)
+    env_file = _write_env_file(tmp_path, "DEDUP_STORE=redis")
+
+    with pytest.raises(ConfigError, match="sqlite"):
+        get_settings(env_file, reload=True)
+
+
+def test_redis_url_is_not_a_setting(tmp_path, monkeypatch):
+    """No Redis store exists, so no Redis setting should imply one."""
+
+    monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")
+    settings = get_settings(_write_env_file(tmp_path, ""), reload=True)
+
+    assert not hasattr(settings, "redis_url")

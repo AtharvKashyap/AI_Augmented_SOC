@@ -219,6 +219,19 @@ def normalize_wazuh_event(event: RawEvent) -> Alert:
                 "win.eventdata.commandLine",
             ],
         ),
+        logon_type=_first_string(
+            payload,
+            [
+                "data.win.eventdata.logonType",
+                "win.eventdata.logonType",
+                "data.logon_type",
+            ],
+        ),
+        fired_times=_first_int(payload, ["rule.firedtimes", "_source.rule.firedtimes"]),
+        bytes_transferred=_first_int(
+            payload,
+            ["network.bytes", "data.bytes", "zeek.conn.orig_bytes", "source.bytes"],
+        ),
         raw_event_id=event.id,
         raw=payload,
     )
@@ -323,6 +336,18 @@ def normalize_security_onion_event(event: RawEvent) -> Alert:
         user=_first_string(payload, ["user.name", "source.user.name", "destination.user.name"]),
         process_name=_first_string(payload, ["process.name", "process.executable"]),
         command_line=_first_string(payload, ["process.command_line"]),
+        # Zeek conn logs carry the volume; `network.bytes` is the ECS total and
+        # `orig_bytes` the outbound half, which is the direction that matters for
+        # exfiltration.
+        bytes_transferred=_first_int(
+            payload,
+            [
+                "network.bytes",
+                "zeek.conn.orig_bytes",
+                "source.bytes",
+                "_source.network.bytes",
+            ],
+        ),
         raw_event_id=event.id,
         raw=payload,
     )
@@ -677,6 +702,34 @@ def _first_string(payload: JsonDict, paths: list[str]) -> str | None:
         value = ",".join(str(item) for item in value if str(item).strip() != "")
     text = str(value).strip()
     return text if text else None
+
+
+def _first_int(payload: JsonDict, paths: list[str]) -> int | None:
+    """Return the first path whose value reads as a non-negative integer.
+
+    Sources are inconsistent about whether counts arrive as numbers or as
+    strings, so both are accepted. An unparseable value is skipped rather than
+    raising: a malformed count must not cost the whole alert.
+
+    Inputs:
+        payload: Source payload.
+        paths: Dotted paths to try in order.
+
+    Outputs:
+        Integer value, or None when no path yields one.
+    """
+
+    for path in paths:
+        value = _get_path(payload, path)
+        if isinstance(value, bool):
+            continue
+        try:
+            number = int(str(value).strip())
+        except (TypeError, ValueError):
+            continue
+        if number >= 0:
+            return number
+    return None
 
 
 def _first_list(payload: JsonDict, paths: list[str]) -> list[str]:

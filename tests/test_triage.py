@@ -1074,3 +1074,170 @@ def test_asset_criticality_alone_cannot_manufacture_a_page():
     candidate.asset_context = {"criticality": "critical", "internet_facing": True}
 
     assert score_candidate_locally(candidate) < 8
+
+
+def test_a_remote_interactive_logon_outscores_a_network_logon():
+    """An RDP session on a server is not a file-share access.
+
+    Local scoring had no notion of logon type, so a successful RemoteInteractive
+    logon into production from a subnet the account had never used scored 2 and was
+    marked likely-benign — meaning nobody looks again. The rule level is low
+    because Windows logs every successful logon at the same level; the logon type
+    is what distinguishes them.
+    """
+
+    network = _quiet_alert("a-1", rule_name="Windows logon success")
+    network.logon_type = "3"
+    remote = _quiet_alert("a-2", rule_name="Windows logon success")
+    remote.logon_type = "10"
+
+    assert score_alert_locally(remote) > score_alert_locally(network)
+
+
+def test_a_rule_that_fires_constantly_is_damped():
+    """`firedtimes` is a baseline Wazuh already computes and we ignored.
+
+    A rule that has fired 15,726 times on this deployment is describing routine
+    activity. Expected file-integrity churn in a log directory is the canonical
+    case: it is a real level-7 rule and it is also noise here.
+    """
+
+    routine = _quiet_alert("a-1", rule_name="File modified")
+    routine.severity = AlertSeverity.MEDIUM
+    routine.fired_times = 15726
+    rare = _quiet_alert("a-2", rule_name="File modified")
+    rare.severity = AlertSeverity.MEDIUM
+    rare.fired_times = 2
+
+    assert score_alert_locally(routine) < score_alert_locally(rare)
+
+
+def test_a_constantly_firing_high_severity_rule_is_never_damped():
+    """Common is not the same as harmless.
+
+    Brute-force and malware rules fire constantly on a real estate. Damping by
+    frequency alone would suppress exactly the detections that matter most, so the
+    baseline adjustment must never touch a high or critical severity alert.
+    """
+
+    frequent_and_serious = _alert(alert_id="a-1", severity=AlertSeverity.CRITICAL)
+    frequent_and_serious.fired_times = 50_000
+    rare_and_serious = _alert(alert_id="a-2", severity=AlertSeverity.CRITICAL)
+    rare_and_serious.fired_times = 1
+
+    assert score_alert_locally(frequent_and_serious) == score_alert_locally(rare_and_serious)
+
+
+def test_a_large_transfer_outscores_a_small_one():
+    """Volume is the substance of an exfiltration alert.
+
+    Without it an 8.79 GB egress and a 9 KB one are the same event, since both
+    carry the same rule and the same addresses.
+    """
+
+    small = _quiet_alert("a-1", rule_name="Outbound connection")
+    small.bytes_transferred = 9_000
+    large = _quiet_alert("a-2", rule_name="Outbound connection")
+    large.bytes_transferred = 8_794_321_408
+
+    assert score_alert_locally(large) > score_alert_locally(small)
+
+
+def test_running_powershell_is_not_by_itself_suspicious():
+    """PowerShell is the default shell on Windows; obfuscation is the signal.
+
+    Treating the interpreter's name as a medium-risk term meant a developer
+    fetching a setup script scored the same as a loader. `-EncodedCommand`,
+    `rundll32`, `mshta` and friends remain medium-risk because they indicate an
+    attempt to obscure what is running.
+    """
+
+    plain = _alert(
+        alert_id="a-1",
+        severity=AlertSeverity.LOW,
+        rule_name="PowerShell script executed",
+        command_line="powershell.exe -File C:\\repo\\setup.ps1",
+        process_name="powershell.exe",
+        dst_ip=None,
+    )
+    obfuscated = _alert(
+        alert_id="a-2",
+        severity=AlertSeverity.LOW,
+        rule_name="PowerShell script executed",
+        command_line="powershell.exe -EncodedCommand aQBlAHgA",
+        process_name="powershell.exe",
+        dst_ip=None,
+    )
+
+    assert score_alert_locally(obfuscated) > score_alert_locally(plain)
+
+
+def test_the_triage_result_records_which_providers_enriched_it():
+    """Milestone 3.5's audit requirement: the *result* must name its inputs.
+
+    Provider and lookup time live on each `EnrichmentResult`, but nothing carried
+    them onto the stored `TriageResult` — so reviewing a decision months later
+    meant guessing which intel it was based on, or whether any applied at all.
+    """
+
+    enrichments = [
+        EnrichmentResult(
+            indicator="8.8.8.8", indicator_type="ip", provider="VirusTotal", summary="clean"
+        ),
+        EnrichmentResult(
+            indicator="8.8.8.8", indicator_type="ip", provider="AbuseIPDB", summary="clean"
+        ),
+    ]
+
+    result = local_triage_alert(_alert(), enrichments)
+
+    assert result.enrichment_providers == ["AbuseIPDB", "VirusTotal"]
+
+
+def test_providers_are_recorded_once_and_in_a_stable_order():
+    """An audit field that reorders between runs cannot be compared or diffed.
+
+    Two indicators enriched by one provider is one provider, not two.
+    """
+
+    enrichments = [
+        EnrichmentResult(indicator="8.8.8.8", indicator_type="ip", provider="Shodan"),
+        EnrichmentResult(indicator="1.1.1.1", indicator_type="ip", provider="Shodan"),
+        EnrichmentResult(indicator="1.1.1.1", indicator_type="ip", provider="AbuseIPDB"),
+    ]
+
+    result = local_triage_alert(_alert(), enrichments)
+
+    assert result.enrichment_providers == ["AbuseIPDB", "Shodan"]
+
+
+def test_the_triage_result_records_the_latest_enrichment_lookup_time():
+    """Stale intel is a reason to distrust a decision, so the age must be visible."""
+
+    early = datetime(2026, 6, 10, 9, 0, tzinfo=UTC)
+    late = datetime(2026, 6, 10, 11, 30, tzinfo=UTC)
+    enrichments = [
+        EnrichmentResult(
+            indicator="8.8.8.8", indicator_type="ip", provider="VirusTotal", looked_up_at=early
+        ),
+        EnrichmentResult(
+            indicator="1.1.1.1", indicator_type="ip", provider="Shodan", looked_up_at=late
+        ),
+    ]
+
+    result = local_triage_alert(_alert(), enrichments)
+
+    assert result.enriched_at == late
+
+
+def test_an_unenriched_result_records_no_providers_rather_than_a_false_one():
+    """"No intel applied" and "intel applied and found nothing" are different facts.
+
+    An empty list plus a null timestamp says the first; inventing a provider name
+    or a lookup time would say the second.
+    """
+
+    result = local_triage_alert(_alert(), [])
+
+    assert result.enrichment_providers == []
+    assert result.enriched_at is None

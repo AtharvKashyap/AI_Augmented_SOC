@@ -9,6 +9,7 @@ real local triage.
 
 from __future__ import annotations
 
+import copy
 import json
 from datetime import UTC
 from pathlib import Path
@@ -636,3 +637,89 @@ def test_a_scorer_returning_a_plain_pair_still_works():
     )
 
     assert report.to_summary()["models"] == {LOCAL_SCORING_LABEL: 1}
+
+
+def _write_splitting_fixture(tmp_path: Path) -> Path:
+    """Write a replay fixture whose events fall outside one clustering window.
+
+    The benign event comes first and the serious one 97 minutes later, so
+    clustering (30-minute window by default) produces two candidates and the
+    first one is the harmless half of the case.
+    """
+
+    events_dir = LABELED_SET_DIR / "events"
+    benign = json.loads((events_dir / "benign_av_definition_update.json").read_text())[0]
+    serious = json.loads((events_dir / "serious_lsass_credential_dump.json").read_text())[0]
+
+    def _at(event: dict, stamp: str) -> dict:
+        event = copy.deepcopy(event)
+        event["timestamp"] = stamp
+        event["payload"]["timestamp"] = stamp
+        return event
+
+    fixture = tmp_path / "splitting_fixture.json"
+    fixture.write_text(
+        json.dumps([_at(benign, "2026-08-05T02:10:00Z"), _at(serious, "2026-08-05T03:47:09Z")]),
+        encoding="utf-8",
+    )
+    return fixture
+
+
+def test_a_case_that_splits_into_several_candidates_is_scored_on_the_worst_one(tmp_path):
+    """A labeled case must never be scored on a fraction of its evidence.
+
+    Events spanning more than one clustering window split into several
+    candidates. Scoring only the first would silently drop the rest, so the
+    highest-scoring candidate is what the case is judged on.
+    """
+
+    case = _case(
+        "splits-across-windows",
+        fixture=str(_write_splitting_fixture(tmp_path)),
+        score_min=8,
+        score_max=10,
+        actions=("page_now",),
+    )
+
+    report = evaluate_cases([case])
+
+    outcome = report.outcomes[0]
+    assert outcome.score >= 8
+    assert outcome.in_band is True
+
+
+def test_a_split_case_is_visible_in_the_report(tmp_path):
+    """Evaluating half a case must not look identical to evaluating all of it."""
+
+    case = _case(
+        "splits-across-windows",
+        fixture=str(_write_splitting_fixture(tmp_path)),
+        score_min=8,
+        score_max=10,
+        actions=("page_now",),
+    )
+
+    report = evaluate_cases([case])
+
+    assert [outcome.case.id for outcome in report.split_cases] == ["splits-across-windows"]
+    summary = report.to_summary()
+    assert summary["split_cases"] == {"splits-across-windows": 2}
+    assert summary["cases"][0]["candidates_scored"] == 2
+
+
+def test_a_case_that_clusters_into_one_candidate_is_not_reported_as_split():
+    """The split report must stay empty for a normal correlated case."""
+
+    case = _case(
+        "correlated",
+        fixture="tests/fixtures/sample_incident_replay.json",
+        score_min=8,
+        score_max=10,
+        actions=("page_now",),
+    )
+
+    report = evaluate_cases([case])
+
+    assert report.split_cases == []
+    assert report.to_summary()["split_cases"] == {}
+    assert report.to_summary()["cases"][0]["candidates_scored"] == 1

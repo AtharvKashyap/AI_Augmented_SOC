@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 from datetime import UTC
 from pathlib import Path
@@ -250,3 +251,50 @@ def test_local_runs_report_no_model():
 
     assert summary["triage_mode"] == "local"
     assert summary["model"] is None
+
+
+def test_main_warns_when_a_case_spans_more_than_one_clustering_window(tmp_path, capsys):
+    """A case scored on fragments must say so on the terminal, not only in JSON.
+
+    "We evaluated half of it" and "we evaluated it" must never look the same.
+    """
+
+    events_dir = Path("tests/fixtures/labeled/events")
+    benign = json.loads((events_dir / "benign_av_definition_update.json").read_text())[0]
+    serious = json.loads((events_dir / "serious_lsass_credential_dump.json").read_text())[0]
+
+    def _at(event: dict, stamp: str) -> dict:
+        event = copy.deepcopy(event)
+        event["timestamp"] = stamp
+        event["payload"]["timestamp"] = stamp
+        return event
+
+    fixture = tmp_path / "split_events.json"
+    fixture.write_text(
+        json.dumps([_at(benign, "2026-08-05T02:10:00Z"), _at(serious, "2026-08-05T03:47:09Z")]),
+        encoding="utf-8",
+    )
+    labels = tmp_path / "labels.json"
+    labels.write_text(
+        json.dumps(
+            [
+                {
+                    "id": "spans-two-windows",
+                    "provenance": "synthetic",
+                    "fixture": str(fixture),
+                    "expected_score_min": 8,
+                    "expected_score_max": 10,
+                    "expected_actions": ["page_now"],
+                    "rationale": "Deliberately spans two clustering windows.",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    main(["--labels", str(labels)])
+
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["split_cases"] == {"spans-two-windows": 2}
+    assert "spans-two-windows" in captured.err
+    assert "clustering window" in captured.err

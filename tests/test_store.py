@@ -12,6 +12,7 @@ isolated, repeatable, and safe to run in CI.
 
 from __future__ import annotations
 
+import sqlite3
 from datetime import UTC, datetime
 
 import pytest
@@ -972,3 +973,78 @@ def test_list_response_actions_honours_a_limit(store):
         store.record_response_action(_proposal(proposal_id=f"RESP-{index}"))
 
     assert len(store.list_response_actions(limit=2)) == 2
+
+
+def test_enrichment_provenance_is_queryable_not_only_inside_the_payload(tmp_path):
+    """Milestone 3.5 asks for provider and lookup time on the *stored* result.
+
+    Everything survives in `payload_json`, but an audit question like "which
+    decisions rested on VirusTotal" has to be answerable with a query. Storing it
+    only as JSON makes that a full-table scan and a parse.
+    """
+
+    store = SQLiteStore(tmp_path / "soc.db")
+    store.initialize()
+    result = TriageResult(
+        id="triage-provenance-001",
+        target_id="alert-001",
+        target_type="alert",
+        score=7,
+        fp_likelihood=FalsePositiveLikelihood.LOW,
+        classification="suspicious",
+        action=TriageAction.QUEUE_REVIEW,
+        summary="stored for audit",
+        enrichment_providers=["AbuseIPDB", "VirusTotal"],
+        enriched_at=datetime(2026, 6, 10, 11, 30, tzinfo=UTC),
+    )
+
+    store.save_triage_result(result)
+
+    with store._connect() as conn:
+        row = conn.execute(
+            "SELECT enrichment_providers, enriched_at FROM triage_results WHERE id = ?",
+            (result.id,),
+        ).fetchone()
+
+    assert "VirusTotal" in row["enrichment_providers"]
+    assert row["enriched_at"] is not None
+
+
+def test_an_older_database_gains_the_provenance_columns_on_initialize(tmp_path):
+    """`CREATE TABLE IF NOT EXISTS` leaves an existing database on its old schema.
+
+    A new column has to be listed in `_ADDED_COLUMNS` as well as the schema, or
+    every database created before this change silently lacks it.
+    """
+
+    db_path = tmp_path / "old.db"
+    with sqlite3.connect(db_path) as conn:
+        # The schema as it stood before these two columns existed. It has to carry
+        # the columns the schema's indexes reference, or this tests nothing real.
+        conn.execute(
+            """
+            CREATE TABLE triage_results (
+                id TEXT PRIMARY KEY,
+                target_id TEXT NOT NULL,
+                target_type TEXT NOT NULL,
+                score INTEGER NOT NULL,
+                fp_likelihood TEXT,
+                classification TEXT,
+                action TEXT,
+                summary TEXT,
+                model TEXT,
+                latency_ms INTEGER,
+                analysis_source TEXT,
+                prompt_version TEXT,
+                payload_json TEXT,
+                created_at TEXT
+            )
+            """
+        )
+
+    SQLiteStore(db_path).initialize()
+
+    with sqlite3.connect(db_path) as conn:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(triage_results)")}
+
+    assert {"enrichment_providers", "enriched_at"} <= columns
