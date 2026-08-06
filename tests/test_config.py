@@ -416,7 +416,11 @@ def test_pflog_text_path_is_separate_from_the_binary_pflog_path(tmp_path):
 
     settings = get_settings(env_file, reload=True)
 
-    assert str(settings.openbsd_pflog_path) == "/var/log/pflog"
+    # Compared as Paths, not as strings: Path normalizes separators per platform,
+    # so str(Path("/var/log/pflog")) is "\\var\\log\\pflog" on Windows. The text
+    # path is a plain str by design, so it stays literal, which is the difference
+    # this test is really about.
+    assert settings.openbsd_pflog_path == Path("/var/log/pflog")
     assert settings.openbsd_pflog_text_path == "data/pflog.txt"
 
 
