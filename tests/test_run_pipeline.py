@@ -23,6 +23,7 @@ from soc.config import ConfigError
 from soc.models import AnalysisSource, FalsePositiveLikelihood, TriageAction, TriageResult
 from soc.pipeline import PipelineError
 from soc.wazuh_client import WazuhError
+from soc.wazuh_indexer_client import WazuhIndexerError
 
 
 @dataclass(slots=True)
@@ -200,6 +201,7 @@ class FakeSecurityOnionClient:
     settings_calls: list[FakeSettings] = []
     last_instance: FakeSecurityOnionClient | None = None
     events_to_return: list[Any] = [{"id": "so-event-001"}]
+    fetches_used: list[str] = []
 
     def __init__(self) -> None:
         """Initialize fake Security Onion client."""
@@ -218,6 +220,14 @@ class FakeSecurityOnionClient:
         """Return fake Security Onion events."""
 
         self.fetch_calls += 1
+        FakeSecurityOnionClient.fetches_used.append("alerts")
+        return list(FakeSecurityOnionClient.events_to_return)
+
+    def fetch_wazuh_mirror_events(self) -> list[Any]:
+        """Return fake mirrored Wazuh events."""
+
+        self.fetch_calls += 1
+        FakeSecurityOnionClient.fetches_used.append("mirror")
         return list(FakeSecurityOnionClient.events_to_return)
 
 
@@ -268,6 +278,7 @@ def _reset_fakes() -> None:
 
     FakeSecurityOnionClient.settings_calls.clear()
     FakeSecurityOnionClient.last_instance = None
+    FakeSecurityOnionClient.fetches_used.clear()
 
     FakeNotifierDispatcher.calls.clear()
     FakeSOCPipeline.created.clear()
@@ -312,6 +323,8 @@ def _args(**overrides: Any) -> argparse.Namespace:
         "replay_dir": None,
         "wazuh": False,
         "security_onion": False,
+        "wazuh_mirror": False,
+        "splunk_search": False,
         "pflog": False,
         "env_file": Path(".env"),
         "db": None,
@@ -1241,3 +1254,367 @@ def test_splunk_send_failure_is_recorded_without_losing_the_run(monkeypatch, tmp
 
     assert summary["splunk_events_sent"] == 0
     assert any("splunk" in error.lower() for error in summary["errors"])
+
+
+def test_splunk_push_happens_every_daemon_cycle(monkeypatch, tmp_path):
+    """A daemon must push each cycle, not accept the flag and send nothing.
+
+    This was previously refused outright rather than built. Refusing was better
+    than silently doing nothing, but pushing per cycle is what an operator
+    actually wants from a continuous run.
+    """
+
+    settings = _patch_cli_dependencies(monkeypatch, tmp_path)
+    settings.splunk_hec_url = "https://splunk.example:8088"
+    settings.splunk_hec_token = "tok"
+    sends: list[int] = []
+
+    class _CountingSplunk:
+        """Splunk client counting each push."""
+
+        @classmethod
+        def from_settings(cls, settings: Any) -> _CountingSplunk:
+            """Return a counting client."""
+
+            return cls()
+
+        def send_triage_results(self, results: Any) -> int:
+            """Count one triage push."""
+
+            sends.append(1)
+            return len(list(results))
+
+        def send_incidents(self, incidents: Any) -> int:
+            """Count one incident push."""
+
+            return len(list(incidents))
+
+    monkeypatch.setattr(run_pipeline, "SplunkClient", _CountingSplunk)
+    replay_file = tmp_path / "replay.json"
+    replay_file.write_text("[]", encoding="utf-8")
+
+    summary = run_from_args(
+        _args(replay=replay_file, daemon=True, splunk=True, poll_interval=1, max_cycles=3)
+    )
+
+    assert len(sends) == 3
+    assert summary["cycles_completed"] == 3
+
+
+def test_the_splunk_client_is_built_once_for_a_daemon_run(monkeypatch, tmp_path):
+    """Rebuilding per cycle would re-resolve config and waste connections."""
+
+    settings = _patch_cli_dependencies(monkeypatch, tmp_path)
+    settings.splunk_hec_url = "https://splunk.example:8088"
+    settings.splunk_hec_token = "tok"
+    builds: list[int] = []
+
+    class _CountingBuild:
+        """Splunk client counting constructions."""
+
+        @classmethod
+        def from_settings(cls, settings: Any) -> _CountingBuild:
+            """Count one construction."""
+
+            builds.append(1)
+            return cls()
+
+        def send_triage_results(self, results: Any) -> int:
+            """Send nothing."""
+
+            return 0
+
+        def send_incidents(self, incidents: Any) -> int:
+            """Send nothing."""
+
+            return 0
+
+    monkeypatch.setattr(run_pipeline, "SplunkClient", _CountingBuild)
+    replay_file = tmp_path / "replay.json"
+    replay_file.write_text("[]", encoding="utf-8")
+
+    run_from_args(_args(replay=replay_file, daemon=True, splunk=True, poll_interval=1, max_cycles=3))
+
+    assert len(builds) == 1
+
+
+def test_a_splunk_failure_mid_daemon_does_not_stop_the_loop(monkeypatch, tmp_path):
+    """A dashboard write must never take down continuous ingestion."""
+
+    settings = _patch_cli_dependencies(monkeypatch, tmp_path)
+    settings.splunk_hec_url = "https://splunk.example:8088"
+    settings.splunk_hec_token = "tok"
+
+    class _BrokenSplunk:
+        """Splunk client whose pushes always fail."""
+
+        @classmethod
+        def from_settings(cls, settings: Any) -> _BrokenSplunk:
+            """Return a broken client."""
+
+            return cls()
+
+        def send_triage_results(self, results: Any) -> int:
+            """Always fail."""
+
+            raise RuntimeError("splunk unreachable")
+
+        def send_incidents(self, incidents: Any) -> int:
+            """Always fail."""
+
+            raise RuntimeError("splunk unreachable")
+
+    monkeypatch.setattr(run_pipeline, "SplunkClient", _BrokenSplunk)
+    replay_file = tmp_path / "replay.json"
+    replay_file.write_text("[]", encoding="utf-8")
+
+    summary = run_from_args(
+        _args(replay=replay_file, daemon=True, splunk=True, poll_interval=1, max_cycles=2)
+    )
+
+    assert summary["cycles_completed"] == 2
+    assert summary["cycles_failed"] == 0
+
+
+def test_the_wazuh_mirror_flag_selects_the_mirrored_read(monkeypatch, tmp_path):
+    """Milestone 1.2 lists mirrored Wazuh data as an alternative read path.
+
+    It is only a real source if it can be selected without hand-writing a query.
+    """
+
+    _patch_cli_dependencies(monkeypatch, tmp_path)
+
+    run_from_args(_args(security_onion=True, wazuh_mirror=True))
+
+    assert FakeSecurityOnionClient.fetches_used == ["mirror"]
+
+
+def test_security_onion_without_the_mirror_flag_reads_alerts(monkeypatch, tmp_path):
+    """The default Security Onion read stays the alert stream."""
+
+    _patch_cli_dependencies(monkeypatch, tmp_path)
+
+    run_from_args(_args(security_onion=True))
+
+    assert FakeSecurityOnionClient.fetches_used == ["alerts"]
+
+
+def test_the_mirror_flag_requires_security_onion(monkeypatch, tmp_path):
+    """`--wazuh-mirror` alone is a configuration mistake, not a third source.
+
+    Accepting it silently would read the ordinary alert stream while the operator
+    believed they were reading mirrored Wazuh data.
+    """
+
+    _patch_cli_dependencies(monkeypatch, tmp_path)
+
+    with pytest.raises(CliError, match="--security-onion"):
+        run_from_args(_args(wazuh=True, wazuh_mirror=True))
+
+
+class FakeSplunkSearchClient:
+    """Fake SplunkSearchClient factory target.
+
+    Attributes:
+        settings_calls: Settings objects the client was built from.
+        last_instance: Most recently constructed instance.
+        events_to_return: Events each fetch returns.
+    """
+
+    settings_calls: list[FakeSettings] = []
+    last_instance: FakeSplunkSearchClient | None = None
+    events_to_return: list[Any] = [{"id": "splunk-event-001"}]
+
+    def __init__(self) -> None:
+        """Initialize the fake client."""
+
+        self.fetch_calls = 0
+        FakeSplunkSearchClient.last_instance = self
+
+    @classmethod
+    def from_settings(cls, settings: FakeSettings) -> FakeSplunkSearchClient:
+        """Record the settings used to build the client.
+
+        Inputs:
+            settings: Application settings.
+
+        Outputs:
+            A fake client.
+        """
+
+        cls.settings_calls.append(settings)
+        return cls()
+
+    def fetch_recent_events(self) -> list[Any]:
+        """Return fake events read out of Splunk.
+
+        Inputs:
+            None.
+
+        Outputs:
+            Fake events.
+        """
+
+        self.fetch_calls += 1
+        return list(FakeSplunkSearchClient.events_to_return)
+
+
+@pytest.fixture(autouse=True)
+def _reset_splunk_search_fake():
+    """Keep the shared fake's recorders from leaking between tests."""
+
+    FakeSplunkSearchClient.settings_calls.clear()
+    FakeSplunkSearchClient.last_instance = None
+    yield
+
+
+def test_splunk_search_is_selectable_as_an_ingestion_source(monkeypatch, tmp_path):
+    """Milestone 5.2: Splunk can act as a read layer once forwarding exists."""
+
+    _patch_cli_dependencies(monkeypatch, tmp_path)
+    monkeypatch.setattr(run_pipeline, "SplunkSearchClient", FakeSplunkSearchClient)
+
+    summary = run_from_args(_args(splunk_search=True))
+
+    assert FakeSplunkSearchClient.last_instance.fetch_calls == 1
+    assert summary["source_mode"] == "splunk_search"
+
+
+def test_the_splunk_search_client_is_built_once_for_a_daemon_run(monkeypatch, tmp_path):
+    """Rebuilding per cycle would discard the search job's auth context."""
+
+    _patch_cli_dependencies(monkeypatch, tmp_path)
+    monkeypatch.setattr(run_pipeline, "SplunkSearchClient", FakeSplunkSearchClient)
+
+    run_from_args(_args(splunk_search=True, daemon=True, poll_interval=1, max_cycles=3))
+
+    assert len(FakeSplunkSearchClient.settings_calls) == 1
+    assert FakeSplunkSearchClient.last_instance.fetch_calls == 3
+
+
+def test_direct_ingestion_still_works_alongside_splunk_search(monkeypatch, tmp_path):
+    """Milestone 5.2 commits to keeping direct ingestion available.
+
+    Splunk becoming an option must not make it the only path, so this pins that
+    `--wazuh` never consults the search client.
+    """
+
+    _patch_cli_dependencies(monkeypatch, tmp_path)
+    monkeypatch.setattr(run_pipeline, "SplunkSearchClient", FakeSplunkSearchClient)
+
+    run_from_args(_args(wazuh=True))
+
+    assert FakeSplunkSearchClient.settings_calls == []
+
+
+def test_the_summary_distinguishes_the_mirror_read_from_the_alert_read(monkeypatch, tmp_path):
+    """Both run under `--security-onion` but read different data.
+
+    One `source_mode` covering both would make a run's own summary unable to say
+    which data it ingested, which is the record needed to explain an empty run.
+    """
+
+    _patch_cli_dependencies(monkeypatch, tmp_path)
+
+    mirror = run_from_args(_args(security_onion=True, wazuh_mirror=True))
+    alerts = run_from_args(_args(security_onion=True))
+
+    assert mirror["source_mode"] != alerts["source_mode"]
+    assert mirror["source_mode"] == "security_onion_wazuh_mirror"
+
+
+def test_the_parser_accepts_splunk_search_as_a_source():
+    """A source the real parser rejects is unreachable, however it is wired.
+
+    The other source tests build a Namespace directly, which bypasses argparse's
+    required mutually-exclusive group entirely — so `--splunk-search` parsed only
+    in tests while the actual CLI refused it.
+    """
+
+    args = build_parser().parse_args(["--splunk-search"])
+
+    assert args.splunk_search is True
+
+
+def test_splunk_search_cannot_be_combined_with_another_source():
+    """Two sources in one run is a configuration mistake, not a merge."""
+
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["--splunk-search", "--wazuh"])
+
+
+def test_the_parser_accepts_the_mirror_flag_alongside_security_onion():
+    """`--wazuh-mirror` modifies a source, so it must not join the exclusive group."""
+
+    args = build_parser().parse_args(["--security-onion", "--wazuh-mirror"])
+
+    assert args.security_onion is True
+    assert args.wazuh_mirror is True
+
+
+def test_an_unconfigured_splunk_search_run_reports_an_error_not_a_traceback(
+    monkeypatch, tmp_path, capsys
+):
+    """Every other source failure prints `error: ...` and exits 1.
+
+    A traceback tells an operator the tool crashed when in fact their
+    configuration is incomplete, and buries the setting name they need.
+    """
+
+    _patch_cli_dependencies(monkeypatch, tmp_path)
+    env_file = tmp_path / "empty.env"
+    env_file.write_text("", encoding="utf-8")
+
+    exit_code = main(["--splunk-search", "--env-file", str(env_file)])
+
+    assert exit_code == 1
+    assert "SPLUNK_SEARCH_URL" in capsys.readouterr().err
+
+
+def test_an_indexer_search_failure_reports_an_error_not_a_traceback(monkeypatch, tmp_path, capsys):
+    """`WazuhIndexerError` is not a `WazuhError`, so it needs catching on its own.
+
+    Subclassing would be the tidier fix but would make the indexer client import
+    `wazuh_client`, which already imports it. Construction failures were wrapped
+    into `WazuhError`; a failure during the search itself was not.
+    """
+
+    _patch_cli_dependencies(monkeypatch, tmp_path)
+
+    class FailingWazuh:
+        """Wazuh client whose fetch fails the way an Indexer search does."""
+
+        @classmethod
+        def from_settings(cls, settings: Any, **kwargs: Any) -> FailingWazuh:
+            """Build the failing client.
+
+            Inputs:
+                settings: Application settings, unused.
+                kwargs: Ignored keyword arguments.
+
+            Outputs:
+                A failing client.
+            """
+
+            return cls()
+
+        def fetch_recent_events(self, **kwargs: Any) -> list[Any]:
+            """Fail as an Indexer search failure.
+
+            Inputs:
+                kwargs: Ignored keyword arguments.
+
+            Outputs:
+                Never returns.
+            """
+
+            raise WazuhIndexerError("wazuh-alerts-* search failed: index_not_found_exception")
+
+    monkeypatch.setattr(run_pipeline, "WazuhClient", FailingWazuh)
+    env_file = tmp_path / "empty.env"
+    env_file.write_text("", encoding="utf-8")
+
+    exit_code = main(["--wazuh", "--env-file", str(env_file)])
+
+    assert exit_code == 1
+    assert "index_not_found_exception" in capsys.readouterr().err

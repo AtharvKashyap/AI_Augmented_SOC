@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
@@ -30,10 +31,14 @@ from soc.pipeline import PipelineConfig, PipelineError, SOCPipeline
 from soc.security_onion_client import SecurityOnionClient, SecurityOnionError
 from soc.shodan_client import ShodanClient
 from soc.splunk_client import SplunkClient, SplunkError
+from soc.splunk_search_client import SplunkSearchClient, SplunkSearchError
 from soc.threat_intel import ThreatIntelEnricher, ThreatIntelError
 from soc.triage import TriageEngine
 from soc.virustotal_client import VirusTotalClient
 from soc.wazuh_client import WazuhClient, WazuhError
+from soc.wazuh_indexer_client import WazuhIndexerError
+
+logger = logging.getLogger(__name__)
 
 JsonDict = dict[str, Any]
 
@@ -56,6 +61,14 @@ def build_parser() -> argparse.ArgumentParser:
         description="Run the AI_Augmented_SOC pipeline.",
     )
     source_group = parser.add_mutually_exclusive_group(required=True)
+    source_group.add_argument(
+        "--splunk-search",
+        action="store_true",
+        help=(
+            "Read events from Splunk via the search API instead of reading Wazuh or "
+            "Security Onion directly. Direct ingestion remains available."
+        ),
+    )
     source_group.add_argument(
         "--replay",
         type=Path,
@@ -80,6 +93,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--security-onion",
         action="store_true",
         help="Fetch recent alerts from the Security Onion Connect API and process them.",
+    )
+    parser.add_argument(
+        "--wazuh-mirror",
+        action="store_true",
+        help=(
+            "With --security-onion, read Wazuh alerts mirrored into Security Onion "
+            "instead of the Suricata/Zeek alert stream."
+        ),
     )
     parser.add_argument(
         "--env-file",
@@ -186,7 +207,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         PipelineError,
         SecurityOnionError,
         SplunkError,
+        SplunkSearchError,
         WazuhError,
+        # Not a WazuhError: subclassing would make the indexer client import
+        # wazuh_client, which already imports it.
+        WazuhIndexerError,
     ) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -252,12 +277,16 @@ def run_from_args(args: argparse.Namespace) -> JsonDict:
     # every cycle. Rebuilding per cycle would reset the cursor and re-read the
     # whole alert file each time.
     run_cycle = _build_run_cycle(args, settings, pipeline, use_cursor=args.daemon)
+    splunk_client = _build_splunk_client(args, settings)
+    splunk_sent: list[int] = []
+    splunk_errors: list[str] = []
+    if splunk_client is not None:
+        run_cycle = _with_splunk_push(run_cycle, splunk_client, splunk_sent, splunk_errors)
 
     if args.daemon:
         summary = _run_daemon(args, settings, run_cycle)
-        run_result: Any | None = None
     else:
-        summary, run_result = _run_once(args, run_cycle)
+        summary = _run_once(args, run_cycle)
 
     summary["source_mode"] = source_mode
     summary["db_path"] = str(db_path)
@@ -265,7 +294,11 @@ def run_from_args(args: argparse.Namespace) -> JsonDict:
     summary["notifications_enabled"] = args.notify
     summary["dry_run"] = args.dry_run
     summary["triage_mode"] = triage_mode
-    summary["splunk_events_sent"] = _push_to_splunk(args, settings, summary, run_result)
+    summary["splunk_events_sent"] = sum(splunk_sent)
+    if splunk_errors:
+        # Surfaced in the summary as well as the log: a push failure an operator
+        # cannot see in the run output is a failure they will not notice.
+        summary.setdefault("errors", []).extend(splunk_errors)
     summary["intel_providers"] = (
         sorted(provider.name for provider in intel_enricher.providers)
         if intel_enricher is not None
@@ -326,66 +359,81 @@ def _build_intel_enricher(settings: Any, *, use_intel: bool) -> ThreatIntelEnric
     )
 
 
-def _push_to_splunk(
-    args: argparse.Namespace,
-    settings: Any,
-    summary: JsonDict,
-    result: Any | None,
-) -> int:
-    """Push triage results and incidents to Splunk when asked.
+def _build_splunk_client(args: argparse.Namespace, settings: Any) -> Any | None:
+    """Build the Splunk client once when a push was requested.
 
-    Sending SOC results to a third-party index is opt-in, so this does nothing
-    without --splunk. Requesting it without HEC settings is a misconfiguration
-    and fails loudly, but a send that fails at runtime is recorded and tolerated:
-    the results are already persisted locally, so losing the run over a
-    dashboard write would be the wrong trade.
+    Built once and reused for every cycle: rebuilding per cycle would re-resolve
+    configuration and discard connections for no benefit.
 
     Inputs:
         args: Parsed argparse namespace.
         settings: Application settings object.
-        summary: Mutable run summary, used to record send errors.
-        result: Run result carrying the objects to send, or None in daemon mode.
 
     Outputs:
-        Number of events sent.
+        SplunkClient, or None when no push was requested.
 
     Raises:
-        CliError: If --splunk is requested but HEC settings are missing, or if it
-        is combined with --daemon, which is not supported yet.
+        CliError: If a push was requested but HEC settings are missing or invalid.
     """
 
     if not args.splunk:
-        return 0
+        return None
 
     if not str(getattr(settings, "splunk_hec_url", "") or "").strip():
         raise CliError("--splunk requires SPLUNK_HEC_URL and SPLUNK_HEC_TOKEN")
 
-    if result is None:
-        # Better to refuse than to accept the flag and quietly send nothing every
-        # cycle. Per-cycle pushing is a real feature, not an accident of wiring.
-        raise CliError("--splunk is not supported with --daemon yet")
-
     try:
-        client = SplunkClient.from_settings(settings)
+        return SplunkClient.from_settings(settings)
     except SplunkError as exc:
         raise CliError(f"cannot build Splunk client: {exc}") from exc
 
-    triage_results = [item.triage for item in getattr(result, "item_results", [])]
-    incidents = list(getattr(result, "incidents", []))
 
-    sent = 0
-    errors = summary.setdefault("errors", [])
-    for label, send in (
-        ("triage results", lambda: client.send_triage_results(triage_results)),
-        ("incidents", lambda: client.send_incidents(incidents)),
-    ):
-        try:
-            sent += int(send() or 0)
-        except Exception as exc:
-            # Results are already persisted locally, so a failed dashboard write
-            # is recorded rather than allowed to fail the run.
-            errors.append(f"splunk push of {label} failed: {exc}")
-    return sent
+def _with_splunk_push(
+    run_cycle: Callable[[], Any],
+    client: Any,
+    sent: list[int],
+    errors: list[str],
+) -> Callable[[], Any]:
+    """Wrap a cycle so its results are pushed to Splunk after it completes.
+
+    Wrapping the cycle rather than pushing once after the run is what makes this
+    work in daemon mode: each cycle's results go out as they are produced, instead
+    of a continuous run sending nothing at all.
+
+    A push failure is logged and counted as zero rather than raised. The results
+    are already persisted locally, so a failed dashboard write must never take
+    down continuous ingestion.
+
+    Inputs:
+        run_cycle: Callable performing one cycle.
+        client: Splunk client to push through.
+        sent: Mutable list accumulating per-cycle event counts.
+        errors: Mutable list accumulating push failures, surfaced in the summary.
+
+    Outputs:
+        Wrapped callable returning the same run result.
+    """
+
+    def _cycle_with_push() -> Any:
+        """Run one cycle, then push its results."""
+
+        result = run_cycle()
+        triage_results = [item.triage for item in getattr(result, "item_results", [])]
+        incidents = list(getattr(result, "incidents", []))
+
+        for label, send in (
+            ("triage results", lambda: client.send_triage_results(triage_results)),
+            ("incidents", lambda: client.send_incidents(incidents)),
+        ):
+            try:
+                sent.append(int(send() or 0))
+            except Exception as exc:
+                message = f"splunk push of {label} failed: {exc}"
+                logger.warning("%s", message)
+                errors.append(message)
+        return result
+
+    return _cycle_with_push
 
 
 def _build_asset_inventory(settings: Any) -> AssetInventory | None:
@@ -438,7 +486,7 @@ def _initialize_store(pipeline: Any) -> None:
         raise CliError(f"cannot initialize database: {exc}") from exc
 
 
-def _run_once(args: argparse.Namespace, run_cycle: Callable[[], Any]) -> tuple[JsonDict, Any]:
+def _run_once(args: argparse.Namespace, run_cycle: Callable[[], Any]) -> JsonDict:
     """Run one pipeline cycle and summarize it.
 
     Inputs:
@@ -446,8 +494,8 @@ def _run_once(args: argparse.Namespace, run_cycle: Callable[[], Any]) -> tuple[J
         run_cycle: Callable performing one cycle.
 
     Outputs:
-        Tuple of JSON-safe summary and the run result, which downstream steps
-        such as the Splunk push need the actual objects from.
+        JSON-safe summary dictionary. The Splunk push is applied by wrapping the
+        cycle itself, so nothing downstream needs the run result.
     """
 
     del args
@@ -455,7 +503,7 @@ def _run_once(args: argparse.Namespace, run_cycle: Callable[[], Any]) -> tuple[J
     summary = result.to_summary()
     summary["reports_written"] = [str(path) for path in result.report_paths]
     summary["analysis_sources"] = _count_analysis_sources(result)
-    return summary, result
+    return summary
 
 
 def _run_daemon(
@@ -520,8 +568,15 @@ def _build_run_cycle(
         Callable returning a pipeline run result.
 
     Raises:
-        CliError: If no event source was selected.
+        CliError: If no event source was selected, or if a source modifier was
+        given without the source it modifies.
     """
+
+    if getattr(args, "wazuh_mirror", False) and not args.security_onion:
+        # A modifier, not a third source, and checked before dispatch so it cannot
+        # be shadowed by whichever source happens to be selected. Ignoring it would
+        # leave the operator believing they were reading mirrored Wazuh data.
+        raise CliError("--wazuh-mirror reads through Security Onion and requires --security-onion")
 
     if args.replay is not None:
         return lambda: pipeline.run_replay_file(args.replay)
@@ -559,17 +614,33 @@ def _build_run_cycle(
             return pipeline.run_events(events)
 
         return _pflog_cycle
+    if getattr(args, "splunk_search", False):
+        # Built once per run, not per cycle: the client holds the auth context its
+        # search jobs are dispatched with.
+        search = SplunkSearchClient.from_settings(settings)
+
+        def _splunk_search_cycle() -> Any:
+            """Read events out of Splunk and process them."""
+
+            return pipeline.run_events(search.fetch_recent_events())
+
+        return _splunk_search_cycle
     if args.security_onion:
         onion = SecurityOnionClient.from_settings(settings)
+        read_mirror = getattr(args, "wazuh_mirror", False)
 
         def _security_onion_cycle() -> Any:
-            """Fetch recent Security Onion alerts and process them."""
+            """Fetch recent Security Onion events and process them."""
 
-            return pipeline.run_events(onion.fetch_recent_events())
+            events = (
+                onion.fetch_wazuh_mirror_events() if read_mirror else onion.fetch_recent_events()
+            )
+            return pipeline.run_events(events)
 
         return _security_onion_cycle
     raise CliError(
-        "one source is required: --replay, --replay-dir, --wazuh, --security-onion, or --pflog"
+        "one source is required: --replay, --replay-dir, --wazuh, --security-onion, "
+        "--splunk-search, or --pflog"
     )
 
 
@@ -659,9 +730,12 @@ def _source_mode(args: argparse.Namespace) -> str:
     if args.pflog:
         return "pflog"
     if args.security_onion:
-        return "security_onion"
+        return "security_onion_wazuh_mirror" if args.wazuh_mirror else "security_onion"
+    if args.splunk_search:
+        return "splunk_search"
     raise CliError(
-        "one source is required: --replay, --replay-dir, --wazuh, --security-onion, or --pflog"
+        "one source is required: --replay, --replay-dir, --wazuh, --security-onion, "
+        "--splunk-search, or --pflog"
     )
 
 

@@ -34,6 +34,13 @@ Security Onion mode (Connect API — **requires a Security Onion Pro licence**):
 
 ```bash
 python3 run_pipeline.py --security-onion --output output --pretty
+python3 run_pipeline.py --security-onion --wazuh-mirror   # mirrored Wazuh data, tagged EventSource.WAZUH
+```
+
+Splunk as the read layer (Milestone 5.2 — direct ingestion stays available):
+
+```bash
+python3 run_pipeline.py --splunk-search --output output --pretty
 ```
 
 OpenBSD firewall context and Splunk output (Phase 5):
@@ -42,6 +49,8 @@ OpenBSD firewall context and Splunk output (Phase 5):
 tcpdump -n -e -ttt -r /var/log/pflog > pflog.txt   # OPENBSD_PFLOG_TEXT_PATH reads this
 python3 run_pipeline.py --pflog --pretty
 python3 run_pipeline.py --wazuh --splunk           # push results to Splunk HEC after the run
+python3 run_pipeline.py --wazuh --splunk --daemon  # pushes every cycle
+python3 run_report.py generate INC-... --splunk    # push one incident summary
 ```
 
 Continuous polling (Milestone 1.6):
@@ -194,6 +203,8 @@ Config tests write a throwaway `.env.test` under `tmp_path` and `monkeypatch.del
 
 - Auth is OAuth2 client credentials: `POST /oauth2/token` with HTTP Basic auth and `grant_type=client_credentials`, yielding a bearer token cached until shortly before `expires_in` elapses. Configured via `SECURITYONION_CLIENT_ID` / `SECURITYONION_CLIENT_SECRET`, **not** the console username and password (which remain in `Settings` unused by this client).
 - Events come from `GET /connect/query/data`.
+- **Zeek queries do not apply the alert severity floor.** `fetch_zeek_*_events` passes `min_severity=0`. The configured floor is tuned for Suricata alerts; Zeek connection/DNS/HTTP logs carry no severity, so the floor would return nothing while looking indistinguishable from a host with no traffic.
+- **Addresses interpolated into a Security Onion query must be validated as IPs first.** Query targets come from alert data, which is attacker-controlled. `_zeek_query` parses with `ipaddress.ip_address` and refuses anything else before a request is made.
 - **Several query parameters are inferred, not documented.** Security Onion does not publish the time-range, limit, timezone, or date-format parameter names for that endpoint. Every inferred name and value lives only as a `SecurityOnionConfig` field (`range_param`, `zone_param`, `format_param`, `limit_param` defaulting to `eventLimit`, plus `zone`, `date_format`, `range_datetime_format`, `range_separator`, and the `query` index pattern). Never hardcode one at a call site — when a real grid disagrees, it should be a one-line change in that dataclass.
 - Because those params may be ignored by a real grid, severity and lookback filtering are **re-applied locally** after the query. Don't remove that as redundant.
 - Severity is compared through `severity_from_security_onion`, not numerically, because Suricata numbers severity *downwards*. With `SO_MIN_SEVERITY=2`, severities 1–2 are kept and 3+ dropped; documents with no interpretable severity are kept rather than silently dropped.
@@ -206,7 +217,9 @@ Config tests write a throwaway `.env.test` under `tmp_path` and `monkeypatch.del
 - `WazuhAlertJsonReader` — the actual alert source. Reads line-delimited `alerts.json` from `WAZUH_ALERT_JSON_PATH`, filters by lookback window and `WAZUH_MIN_LEVEL`, sorts, and keeps the newest `WAZUH_ALERT_LIMIT`. If not running on the Manager host, the file must be copied/mounted locally first.
 - `WazuhManagerClient` — optional, HTTP API against `:55000`, used *only* for agent inventory context to enrich alerts. Absent credentials, `fetch_agent_inventory()` returns `{}` and ingestion still works.
 
-`from_settings` hard-requires `WAZUH_ALERT_SOURCE=json_logs`; indexer-based ingestion settings exist in `Settings` but no indexer client does. `WazuhClient.fetch_recent_events` accepts `lookback_minutes`/`min_level`/`limit` for CLI compatibility and **ignores them** — the reader already holds those values from settings.
+Malformed `alerts.json` lines are skipped, counted on `last_malformed_line_count`, and logged — never fatal. In daemon mode the reader keeps a byte cursor and detects truncation by content fingerprint (a same-size rewrite from `copytruncate` defeats a size comparison), so a one-shot run still re-reads the whole file while a polling loop resumes.
+
+`WAZUH_ALERT_SOURCE` selects the read path: `json_logs` (above) or `indexer` (`WazuhIndexerClient`, OpenSearch `_search` over `wazuh-alerts-*`). `WazuhClient` requires exactly one of `alert_reader`/`indexer` — never zero, never both. Two indexer specifics worth knowing: the query's window/level filters are re-applied locally and **the local pass is authoritative** (an index template mapping `rule.level` as a keyword would silently not honour the range filter), and the hit `_id` is deliberately unused for event IDs because OpenSearch reassigns it on reindex, which would reprocess the alert. In daemon mode the indexer path has **no read cursor** — cursors are file-offset-specific — so each cycle re-queries the lookback window and depends on content dedup. Wazuh data mirrored into Security Onion is a third route, reached with `--security-onion --wazuh-mirror`; see the ID and tagging invariants under Conventions before adding a fourth. `WazuhClient.fetch_recent_events` accepts `lookback_minutes`/`min_level`/`limit` for CLI compatibility and **ignores them** — the reader already holds those values from settings.
 
 ## Conventions
 
@@ -221,12 +234,17 @@ Config tests write a throwaway `.env.test` under `tmp_path` and `monkeypatch.del
 - **Fake credentials in tests must be low-entropy and self-describing**, e.g. `"fake-key-do-not-report"`, and must not be assigned to a name like `API_KEY`. A random-looking value trips the Gitleaks job, and on entropy alone a scanner cannot tell a sentinel from a real key. Note the PR-mode scan covers the whole PR commit range, so removing a flagged string in a *later* commit does not clear it — the branch history has to not contain it.
 - **Do not use RFC 5737 documentation IPs (`203.0.113.x`, `198.51.100.x`) as stand-ins for public addresses in tests.** They report `is_global == False`, so anything gating on public routability — threat-intel lookups, firewall block targets — correctly refuses them, and the test then passes or fails for the wrong reason. Use `8.8.8.8` or `1.1.1.1`. This has bitten twice.
 - **Never compare `str(Path)` to a slashed literal.** `Path` normalizes separators per platform, so `str(Path("/var/log/pflog"))` is `\var\log\pflog` on Windows. Compare `Path` to `Path` instead. Settings that are `str` by design (`asset_inventory_path`, `openbsd_pflog_text_path`) do not normalize and can be compared literally.
+- **The same event read through two paths must not share an event ID.** One Wazuh alert can arrive from `alerts.json`, from Splunk search, from the Indexer, or mirrored through Security Onion. Those are separate *retrievals* of one event, and identical IDs would let one overwrite the other's audit row. Every alternative read path prefixes its IDs (`splunk-search-`, `so-wazuh-mirror-`, …) and documents why in the constant.
+- **Tag an event by its origin, not its transport.** Wazuh data mirrored through Security Onion is `EventSource.WAZUH`. Tagging by transport routes it to a normalizer expecting Suricata/Zeek field paths, and the alert silently loses its rule and agent fields — nothing errors.
 - **Never hardcode byte arithmetic in a test.** Windows text-mode writes translate `\n` to `\r\n`, so `len(text) + 1` is a POSIX-only assumption that fails there. Compare against the actual `st_size`, or capture a size before and after and compare those. Two Windows-only CI failures came from this. The reader itself reads in binary and counts real bytes, so CRLF input is handled correctly and there is a test proving it.
 
-## Not built yet
+## What is not verified
 
-No placeholder files remain — if a module isn't there, it isn't written. Notably absent: a live Security Onion client (Security Onion *normalization* is implemented and tested; only retrieval is missing), a polling daemon, `INC-*` incident promotion, LLM-drafted report prose, and all external enrichment providers.
+All six phases in `PLAN.md` are implemented. No placeholder files remain — if a module isn't there, it isn't written. What's missing is *contact with reality*, and the gaps are specific:
 
-`WazuhAlertJsonReader` re-reads the whole `alerts.json` on every run and has no byte cursor or rotation handling, so it is correct for one-shot CLI use and not yet safe for a polling loop (PLAN.md Milestone 1.1a). It does tolerate malformed lines: they are skipped, counted on `last_malformed_line_count`, and logged.
+- **No integration has run against a live system.** Not Wazuh Manager, not the Wazuh Indexer, not Security Onion, not Splunk (HEC or search), not a real OpenRouter key, not a real `pfctl`. Every one of them is exercised only against injected fakes.
+- **Inferred field names and formats** are isolated in named constants with a docstring saying so: the Security Onion query parameters, the Wazuh Indexer response paths, the Splunk search response shape, and `PFLOG_LINE_PATTERN`. A real deployment disagreeing with one should be a one-line correction, not a refactor — keep it that way.
+- **Thresholds are guesses.** Triage bands, routing cutoffs, and incident-promotion bars have never been tuned against real alert volume. The labeled evaluation set holds 5 seed cases, not the 40+ the plan calls for; growing it is a labeling task needing a human, and `run_review.py --promote` is the intended source.
+- **No response action has executed against a live target**, by design. `soc/response.py` gates every action behind six independent checks — read that section above before touching it.
 
-`data/`, `output/`, and `logs/` are gitignored (`.gitkeep` only). `PLAN.md` holds the six-phase roadmap with per-milestone status, a **Known defects** table (verified issues with file locations), and the rationale for current scope — check it before assuming a feature works.
+`data/`, `output/`, and `logs/` are gitignored (`.gitkeep` only). `PLAN.md` holds the six-phase roadmap with per-milestone status, a **Known defects** table (verified issues with file locations), and the rationale for current scope — check it before assuming a feature is verified rather than merely written.

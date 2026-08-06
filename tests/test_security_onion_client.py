@@ -796,3 +796,202 @@ def test_elasticsearch_hit_normalizes_through_the_existing_normalizer():
     assert alert.dst_ip == "198.51.100.4"
     assert alert.rule_name == "Zeek Notice"
     assert alert.severity == AlertSeverity.MEDIUM
+
+
+def _captured_query(client_call) -> str:
+    """Run a client call and return the `query` parameter it sent.
+
+    Inputs:
+        client_call: Callable taking a client and returning anything.
+
+    Outputs:
+        The URL-decoded value of the `query` request parameter.
+    """
+
+    captured: list[str] = []
+
+    def opener(request, *, timeout, context):
+        if request.full_url.endswith(so_client.TOKEN_PATH):
+            return FakeHTTPResponse(_token_body())
+        captured.append(
+            urllib.parse.parse_qs(urllib.parse.urlparse(request.full_url).query)["query"][0]
+        )
+        return FakeHTTPResponse(json.dumps({"events": []}))
+
+    client_call(SecurityOnionClient(_config(), opener=opener))
+    assert len(captured) == 1
+    return captured[0]
+
+
+@pytest.mark.parametrize(
+    ("method_name", "dataset"),
+    [
+        ("fetch_zeek_conn_events", "conn"),
+        ("fetch_zeek_dns_events", "dns"),
+        ("fetch_zeek_http_events", "http"),
+    ],
+)
+def test_each_zeek_helper_filters_to_its_own_dataset(method_name, dataset):
+    """Milestone 1.2 asks for connection, DNS, and HTTP queries by name.
+
+    Reaching these through a hand-written `query` string worked, but the dataset
+    name is exactly the kind of detail that gets mistyped at a call site and
+    returns zero rows without erroring.
+    """
+
+    query = _captured_query(lambda client: getattr(client, method_name)(ip="198.18.7.7"))
+
+    assert f"event.dataset:{dataset}" in query
+
+
+def test_a_zeek_ip_query_matches_either_direction():
+    """An address is interesting whether it was the source or the destination.
+
+    Filtering on `source.ip` alone would silently miss inbound traffic to a
+    compromised host, which is the direction that matters most.
+    """
+
+    query = _captured_query(lambda client: client.fetch_zeek_conn_events(ip="198.18.7.7"))
+
+    assert "source.ip:198.18.7.7" in query
+    assert "destination.ip:198.18.7.7" in query
+    assert " OR " in query
+
+
+def test_a_zeek_query_without_an_ip_returns_the_whole_dataset():
+    """Omitting the address is a valid "show me all DNS" query, not an error."""
+
+    query = _captured_query(lambda client: client.fetch_zeek_dns_events())
+
+    assert query == "event.dataset:dns"
+    assert "source.ip" not in query
+
+
+def test_a_malformed_ip_is_rejected_before_a_request_is_made():
+    """The IP is interpolated into a query string, so it must be validated.
+
+    Zeek queries are driven by addresses taken from alert data, which is
+    attacker-controlled. An unvalidated value could inject query syntax.
+    """
+
+    def opener(request, *, timeout, context):
+        if request.full_url.endswith(so_client.TOKEN_PATH):
+            return FakeHTTPResponse(_token_body())
+        raise AssertionError("no query request may be made for an invalid IP")
+
+    client = SecurityOnionClient(_config(), opener=opener)
+
+    with pytest.raises(ValueError, match="not a valid IP address"):
+        client.fetch_zeek_conn_events(ip="10.0.0.1 OR *")
+
+
+def test_zeek_helpers_return_raw_events_ready_for_the_pipeline():
+    """The helpers exist to feed SOCPipeline, so they must return RawEvents."""
+
+    document = _document(_id="zeek-1", event={"dataset": "conn"})
+
+    def opener(request, *, timeout, context):
+        if request.full_url.endswith(so_client.TOKEN_PATH):
+            return FakeHTTPResponse(_token_body())
+        return FakeHTTPResponse(json.dumps({"events": [document]}))
+
+    client = SecurityOnionClient(_config(min_severity=0), opener=opener)
+
+    events = client.fetch_zeek_conn_events(ip="198.18.7.7")
+
+    assert [event.payload["_id"] for event in events] == ["zeek-1"]
+
+
+def test_zeek_queries_do_not_apply_the_alert_severity_floor():
+    """Zeek logs are not alerts and carry no severity, so a floor would drop all.
+
+    `fetch_recent_alerts` defaults to a severity floor suited to Suricata alerts.
+    Applying it to connection logs would return nothing while looking like the
+    host simply had no traffic.
+    """
+
+    document = _document(_id="conn-1", event={"dataset": "conn"})
+    document.pop("suricata", None)
+
+    def opener(request, *, timeout, context):
+        if request.full_url.endswith(so_client.TOKEN_PATH):
+            return FakeHTTPResponse(_token_body())
+        return FakeHTTPResponse(json.dumps({"events": [document]}))
+
+    client = SecurityOnionClient(_config(min_severity=2), opener=opener)
+
+    assert len(client.fetch_zeek_conn_events(ip="198.18.7.7")) == 1
+
+
+def test_wazuh_mirror_events_filter_to_wazuh_data():
+    """Milestone 1.2 offers Security Onion as an alternative Wazuh read path.
+
+    Reachable by hand-writing a `query`, but a named method is what makes it a
+    usable source rather than a thing you have to know the field name for.
+    """
+
+    query = _captured_query(lambda client: client.fetch_wazuh_mirror_events())
+
+    assert so_client.WAZUH_MIRROR_QUERY in query
+
+
+def test_wazuh_mirror_events_are_tagged_as_wazuh_not_security_onion():
+    """The event's origin is Wazuh; Security Onion was only the transport.
+
+    Tagging these `security_onion` would send them to a normalizer expecting
+    Suricata/Zeek field paths, and the resulting alerts would lose their rule and
+    agent fields without anything erroring.
+    """
+
+    document = _document(_id="mirror-1", event={"dataset": "alert", "module": "wazuh"})
+
+    def opener(request, *, timeout, context):
+        if request.full_url.endswith(so_client.TOKEN_PATH):
+            return FakeHTTPResponse(_token_body())
+        return FakeHTTPResponse(json.dumps({"events": [document]}))
+
+    client = SecurityOnionClient(_config(min_severity=0), opener=opener)
+
+    events = client.fetch_wazuh_mirror_events()
+
+    assert [event.source for event in events] == [EventSource.WAZUH]
+
+
+def test_a_mirrored_event_id_does_not_collide_with_the_direct_read_of_it():
+    """One alert read two ways is two retrievals, not one event.
+
+    Giving the mirrored copy the same ID as the `alerts.json` copy would let one
+    overwrite the other's audit row. Same reason the Splunk search client prefixes
+    its IDs.
+    """
+
+    document = _document(_id="mirror-1", event={"dataset": "alert", "module": "wazuh"})
+
+    def opener(request, *, timeout, context):
+        if request.full_url.endswith(so_client.TOKEN_PATH):
+            return FakeHTTPResponse(_token_body())
+        return FakeHTTPResponse(json.dumps({"events": [document]}))
+
+    client = SecurityOnionClient(_config(min_severity=0), opener=opener)
+
+    event = client.fetch_wazuh_mirror_events()[0]
+
+    assert event.id != "mirror-1"
+    assert event.id.startswith(so_client.WAZUH_MIRROR_ID_PREFIX)
+
+
+def test_a_mirrored_event_id_is_stable_across_reads():
+    """Deterministic IDs are what make dedup and reruns work."""
+
+    document = _document(_id="mirror-1", event={"dataset": "alert", "module": "wazuh"})
+
+    def opener(request, *, timeout, context):
+        if request.full_url.endswith(so_client.TOKEN_PATH):
+            return FakeHTTPResponse(_token_body())
+        return FakeHTTPResponse(json.dumps({"events": [document]}))
+
+    def _read() -> str:
+        client = SecurityOnionClient(_config(min_severity=0), opener=opener)
+        return client.fetch_wazuh_mirror_events()[0].id
+
+    assert _read() == _read()
