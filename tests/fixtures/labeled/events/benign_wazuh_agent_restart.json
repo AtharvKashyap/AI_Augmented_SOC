@@ -1,0 +1,39 @@
+[
+  {
+    "id": "wazuh-agent-started-001",
+    "source": "wazuh",
+    "timestamp": "2026-08-05T06:00:14Z",
+    "payload": {
+      "id": "wazuh-agent-started-001",
+      "timestamp": "2026-08-05T06:00:14Z",
+      "agent": {
+        "id": "004",
+        "name": "linux-app-01",
+        "ip": "10.0.1.10",
+        "os": {
+          "name": "Ubuntu",
+          "version": "22.04.4 LTS"
+        }
+      },
+      "manager": {
+        "name": "wazuh-manager-01"
+      },
+      "rule": {
+        "id": "502",
+        "level": 3,
+        "description": "Ossec agent started.",
+        "groups": [
+          "ossec"
+        ],
+        "firedtimes": 41,
+        "mail": false
+      },
+      "decoder": {
+        "name": "ossec"
+      },
+      "location": "wazuh-monitord",
+      "data": {},
+      "full_log": "ossec: Agent started: 'linux-app-01->10.0.1.10'."
+    }
+  }
+]

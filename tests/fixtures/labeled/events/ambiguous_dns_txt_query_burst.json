@@ -1,0 +1,146 @@
+[
+  {
+    "id": "so-amb-dnstxt-001",
+    "source": "security_onion",
+    "timestamp": "2026-07-14T10:15:02Z",
+    "payload": {
+      "event": {
+        "id": "so-amb-dnstxt-001",
+        "module": "suricata",
+        "dataset": "suricata.eve",
+        "kind": "alert",
+        "category": "network"
+      },
+      "@timestamp": "2026-07-14T10:15:02Z",
+      "source": {
+        "ip": "10.0.3.61",
+        "port": 54233
+      },
+      "destination": {
+        "ip": "10.0.1.53",
+        "port": 53
+      },
+      "host": {
+        "name": "securityonion-sensor-01"
+      },
+      "network": {
+        "protocol": "dns",
+        "transport": "udp",
+        "direction": "internal"
+      },
+      "suricata": {
+        "eve": {
+          "event_type": "alert",
+          "alert": {
+            "signature_id": 2027865,
+            "signature": "ET INFO Observed High Volume of DNS TXT Record Queries",
+            "category": "Potentially Bad Traffic",
+            "severity": 2
+          },
+          "dns": {
+            "type": "query",
+            "rrtype": "TXT",
+            "rrname": "s1.tools-relay.dev-ops-lab.net"
+          }
+        }
+      },
+      "message": "ET INFO Observed High Volume of DNS TXT Record Queries from 10.0.3.61"
+    }
+  },
+  {
+    "id": "so-amb-dnstxt-002",
+    "source": "security_onion",
+    "timestamp": "2026-07-14T10:15:19Z",
+    "payload": {
+      "event": {
+        "id": "so-amb-dnstxt-002",
+        "module": "suricata",
+        "dataset": "suricata.eve",
+        "kind": "alert",
+        "category": "network"
+      },
+      "@timestamp": "2026-07-14T10:15:19Z",
+      "source": {
+        "ip": "10.0.3.61",
+        "port": 54291
+      },
+      "destination": {
+        "ip": "10.0.1.53",
+        "port": 53
+      },
+      "host": {
+        "name": "securityonion-sensor-01"
+      },
+      "network": {
+        "protocol": "dns",
+        "transport": "udp",
+        "direction": "internal"
+      },
+      "suricata": {
+        "eve": {
+          "event_type": "alert",
+          "alert": {
+            "signature_id": 2027865,
+            "signature": "ET INFO Observed High Volume of DNS TXT Record Queries",
+            "category": "Potentially Bad Traffic",
+            "severity": 2
+          },
+          "dns": {
+            "type": "query",
+            "rrtype": "TXT",
+            "rrname": "s2.tools-relay.dev-ops-lab.net"
+          }
+        }
+      },
+      "message": "ET INFO Observed High Volume of DNS TXT Record Queries from 10.0.3.61"
+    }
+  },
+  {
+    "id": "so-amb-dnstxt-003",
+    "source": "security_onion",
+    "timestamp": "2026-07-14T10:16:44Z",
+    "payload": {
+      "event": {
+        "id": "so-amb-dnstxt-003",
+        "module": "suricata",
+        "dataset": "suricata.eve",
+        "kind": "alert",
+        "category": "network"
+      },
+      "@timestamp": "2026-07-14T10:16:44Z",
+      "source": {
+        "ip": "10.0.3.61",
+        "port": 54388
+      },
+      "destination": {
+        "ip": "10.0.1.53",
+        "port": 53
+      },
+      "host": {
+        "name": "securityonion-sensor-01"
+      },
+      "network": {
+        "protocol": "dns",
+        "transport": "udp",
+        "direction": "internal"
+      },
+      "suricata": {
+        "eve": {
+          "event_type": "alert",
+          "alert": {
+            "signature_id": 2027865,
+            "signature": "ET INFO Observed High Volume of DNS TXT Record Queries",
+            "category": "Potentially Bad Traffic",
+            "severity": 2
+          },
+          "dns": {
+            "type": "query",
+            "rrtype": "TXT",
+            "rrname": "s3.tools-relay.dev-ops-lab.net"
+          }
+        }
+      },
+      "message": "ET INFO Observed High Volume of DNS TXT Record Queries from 10.0.3.61"
+    }
+  }
+]

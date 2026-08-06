@@ -1,0 +1,47 @@
+[
+  {
+    "id": "wazuh-sudo-admin-001",
+    "source": "wazuh",
+    "timestamp": "2026-08-05T08:12:41Z",
+    "payload": {
+      "id": "wazuh-sudo-admin-001",
+      "timestamp": "2026-08-05T08:12:41Z",
+      "agent": {
+        "id": "004",
+        "name": "linux-app-01",
+        "ip": "10.0.1.10",
+        "os": {
+          "name": "Ubuntu",
+          "version": "22.04.4 LTS"
+        }
+      },
+      "manager": {
+        "name": "wazuh-manager-01"
+      },
+      "rule": {
+        "id": "5402",
+        "level": 3,
+        "description": "Successful sudo to ROOT executed.",
+        "groups": [
+          "syslog",
+          "sudo"
+        ],
+        "firedtimes": 214,
+        "mail": false
+      },
+      "decoder": {
+        "name": "sudo",
+        "parent": "sudo"
+      },
+      "location": "/var/log/auth.log",
+      "data": {
+        "srcuser": "jmalone",
+        "dstuser": "root",
+        "command": "/usr/bin/systemctl restart nginx",
+        "pwd": "/home/jmalone",
+        "tty": "pts/1"
+      },
+      "full_log": "Aug  5 08:12:41 linux-app-01 sudo: jmalone : TTY=pts/1 ; PWD=/home/jmalone ; USER=root ; COMMAND=/usr/bin/systemctl restart nginx"
+    }
+  }
+]

@@ -1,0 +1,63 @@
+[
+  {
+    "id": "wazuh-patch-window-task-001",
+    "source": "wazuh",
+    "timestamp": "2026-08-05T02:00:07Z",
+    "payload": {
+      "id": "wazuh-patch-window-task-001",
+      "timestamp": "2026-08-05T02:00:07Z",
+      "agent": {
+        "id": "011",
+        "name": "win-fin-07",
+        "ip": "10.0.2.37",
+        "os": {
+          "name": "Microsoft Windows 11 Enterprise",
+          "version": "10.0.22631"
+        }
+      },
+      "manager": {
+        "name": "wazuh-manager-01"
+      },
+      "rule": {
+        "id": "61603",
+        "level": 3,
+        "description": "Windows Task Scheduler: scheduled task action started.",
+        "groups": [
+          "windows",
+          "sysmon",
+          "sysmon_event1"
+        ],
+        "firedtimes": 622,
+        "mail": false
+      },
+      "decoder": {
+        "name": "windows_eventchannel"
+      },
+      "location": "EventChannel",
+      "data": {
+        "win": {
+          "system": {
+            "providerName": "Microsoft-Windows-Sysmon",
+            "eventID": "1",
+            "channel": "Microsoft-Windows-Sysmon/Operational",
+            "computer": "win-fin-07",
+            "severityValue": "INFORMATION",
+            "systemTime": "2026-08-05T02:00:07.1180994Z"
+          },
+          "eventdata": {
+            "image": "C:\\Windows\\System32\\wusa.exe",
+            "commandLine": "\"C:\\Windows\\System32\\wusa.exe\" \\\\10.0.2.5\\patches\\windows11.0-kb5065221-x64.msu /quiet /norestart",
+            "parentImage": "C:\\Windows\\System32\\svchost.exe",
+            "parentCommandLine": "C:\\Windows\\system32\\svchost.exe -k netsvcs -p -s Schedule",
+            "user": "NT AUTHORITY\\SYSTEM",
+            "subjectUserName": "SYSTEM",
+            "integrityLevel": "System",
+            "originalFileName": "wusa.exe",
+            "taskName": "\\Corp\\PatchWindow-Monthly"
+          }
+        }
+      },
+      "full_log": "Microsoft-Windows-Sysmon: INFORMATION(1): Process Create: Image: C:\\Windows\\System32\\wusa.exe CommandLine: wusa.exe \\\\10.0.2.5\\patches\\windows11.0-kb5065221-x64.msu /quiet /norestart User: NT AUTHORITY\\SYSTEM ParentImage: C:\\Windows\\System32\\svchost.exe (Task Scheduler)"
+    }
+  }
+]

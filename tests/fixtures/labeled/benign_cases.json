@@ -1,0 +1,125 @@
+{
+  "_note": "SYNTHETIC benign / low-priority expansion of the labeled set (PLAN.md Milestone 2.5). Every band and rationale below was written from security judgment about what a competent SOC analyst should conclude from the event alone, deliberately BEFORE and independently of anything the scorer outputs. Labels here were never derived by running triage and recording the result: that would make the evaluation tautological. Where the scorer disagrees, the disagreement is a finding about the scorer, not a reason to move the band. Only 'analyst_reviewed' provenance supports an accuracy claim; this file measures self-consistency.",
+  "cases": [
+    {
+      "id": "benign-sudo-known-admin",
+      "provenance": "synthetic",
+      "fixture": "tests/fixtures/labeled/events/benign_sudo_known_admin.json",
+      "expected_score_min": 1,
+      "expected_score_max": 3,
+      "expected_actions": ["mark_likely_benign"],
+      "expected_classification": "low",
+      "rationale": "Wazuh rule 5402 at level 3: a named interactive user escalating to root over an existing pts session and restarting nginx. Sudo authorization succeeded, the command is a routine service action on an app server, and the rule has fired 214 times on this host, so the behaviour is established baseline. Sudo usage is only interesting when the user, the command, or the time is out of pattern; none of those hold here, and paging or queueing on ordinary administration is how a queue becomes unread."
+    },
+    {
+      "id": "benign-av-definition-update",
+      "provenance": "synthetic",
+      "fixture": "tests/fixtures/labeled/events/benign_av_definition_update.json",
+      "expected_score_min": 1,
+      "expected_score_max": 2,
+      "expected_actions": ["mark_likely_benign"],
+      "expected_classification": "low",
+      "rationale": "Defender event 2000 records a successful signature version bump from the Microsoft Update Server, with monotonically increasing versions and no detection or remediation content. This is the security control reporting that it is healthy, which is the opposite of a finding. The only Defender events worth an analyst's time are failures to update, tamper/disable events, or a detection; this is none of them, and it fires nightly on every endpoint."
+    },
+    {
+      "id": "benign-mistyped-password-then-success",
+      "provenance": "synthetic",
+      "fixture": "tests/fixtures/labeled/events/benign_mistyped_password_then_success.json",
+      "expected_score_min": 1,
+      "expected_score_max": 3,
+      "expected_actions": ["mark_likely_benign"],
+      "expected_classification": "low",
+      "rationale": "One failed password followed eight seconds later by a success for the same username, from the same internal source IP and the same source port 58210, meaning the same TCP session and the same sshd child process. That is a person retyping a password, not credential guessing: brute force shows many attempts, many usernames, or many source ports, and a successful compromise following a single failure would be an extraordinary coincidence. Scored as a pair because a lone level-5 failure event in isolation is the thing that tempts a scorer upward, and the adjacent success is what resolves it."
+    },
+    {
+      "id": "benign-authorized-vuln-scanner",
+      "provenance": "synthetic",
+      "fixture": "tests/fixtures/labeled/events/benign_authorized_vuln_scanner.json",
+      "expected_score_min": 2,
+      "expected_score_max": 4,
+      "expected_actions": ["mark_likely_benign", "queue_review"],
+      "expected_classification": "low",
+      "rationale": "A Suricata severity-3 GPL SCAN signature for an internal-to-internal SMB probe originating from 10.0.9.240 in the documented scanning subnet. An analyst who knows the scanner closes this immediately, so the correct end state is benign. The band is deliberately wider than the other cases and lists both actions because the system holds no scanner allowlist: on the event alone, internal reconnaissance against a finance workstation is a legitimate thing to glance at, and pretending only one answer is defensible would misrepresent the ambiguity. It must not page either way, because scan signatures fire in the thousands during any authorized assessment window."
+    },
+    {
+      "id": "benign-backup-job-bulk-reads",
+      "provenance": "synthetic",
+      "fixture": "tests/fixtures/labeled/events/benign_backup_job_bulk_reads.json",
+      "expected_score_min": 1,
+      "expected_score_max": 3,
+      "expected_actions": ["mark_likely_benign"],
+      "expected_classification": "low",
+      "rationale": "An auditd read watch tripped by /usr/bin/borg running as the unprivileged svc-backup account (uid 998) at 01:30, inside the backup window, with a firedtimes count above 20000. Bulk reads of a file share are the signature of both a backup job and data staging for exfiltration, and what separates them is the executing binary, the account, the schedule, and the absence of any outbound transfer. All four point at the backup job here. Individual read events are also the highest-volume thing auditd produces, so anything above suppression would drown the queue on its own."
+    },
+    {
+      "id": "benign-dns-cdn-resolution",
+      "provenance": "synthetic",
+      "fixture": "tests/fixtures/labeled/events/benign_dns_cdn_resolution.json",
+      "expected_score_min": 1,
+      "expected_score_max": 2,
+      "expected_actions": ["mark_likely_benign"],
+      "expected_classification": "low",
+      "rationale": "A Zeek dns record, not an alert: an A query for an Akamai edge hostname returning NOERROR with a short TTL, to a public resolver on udp/53. The label-like randomness of an Akamai edge name is exactly what a naive DGA heuristic mistakes for a generated domain, which is why this case exists next to the seed DGA case: the discriminators are the registered domain, the NOERROR response, and the fact that CDN resolution happens on every endpoint continuously. Successful resolution of a major CDN carries no detection value whatsoever."
+    },
+    {
+      "id": "benign-pf-block-inbound-internet-scan",
+      "provenance": "synthetic",
+      "fixture": "tests/fixtures/labeled/events/benign_pf_block_inbound_scan.json",
+      "expected_score_min": 1,
+      "expected_score_max": 3,
+      "expected_actions": ["mark_likely_benign"],
+      "expected_classification": "low",
+      "rationale": "A pf rule 12 block of a single inbound SYN to telnet/23 on the external interface. The packet never reached the host: this is the firewall enforcing its configured policy, which is a record of a control working rather than a detection. An internet-facing interface absorbs thousands of these an hour from background scanning, so any escalation here would bury the endpoint and network detections an analyst actually needs. Firewall denials become interesting only through correlation with a host-side event, never on their own severity, and the normalizer caps a block at LOW for exactly that reason."
+    },
+    {
+      "id": "benign-wazuh-agent-restart",
+      "provenance": "synthetic",
+      "fixture": "tests/fixtures/labeled/events/benign_wazuh_agent_restart.json",
+      "expected_score_min": 1,
+      "expected_score_max": 3,
+      "expected_actions": ["mark_likely_benign"],
+      "expected_classification": "low",
+      "rationale": "Wazuh rule 502, agent started, on a host at 06:00 with no preceding disconnect gap reported. Agent lifecycle telemetry is monitoring self-reporting, and a start event means visibility was restored rather than lost. The genuinely security-relevant variant is the inverse: an agent stopping, disconnecting, or a prolonged silence, which can indicate an attacker disabling logging. A clean start is bookkeeping and should be searchable but never queued."
+    },
+    {
+      "id": "benign-fim-log-directory-churn",
+      "provenance": "synthetic",
+      "fixture": "tests/fixtures/labeled/events/benign_fim_log_directory_churn.json",
+      "expected_score_min": 1,
+      "expected_score_max": 3,
+      "expected_actions": ["mark_likely_benign"],
+      "expected_classification": "low",
+      "rationale": "A syscheck integrity-changed event on /var/log/appserver/application.log where the size grew by roughly 5KB, mtime advanced 29 seconds, ownership and permissions are unchanged, and the rule has fired over 15000 times. An append-only log growing under its own service account is a log file behaving normally; the FIM scope is simply monitoring a directory it should not. The findings FIM exists to catch are content changes to binaries, configuration, or credential stores, and permission or ownership changes that were not expected. Note this is a level 7 rule and therefore normalizes to MEDIUM severity, so the label is asserting that source severity alone is the wrong basis for this verdict: the correct remediation is tuning the FIM scope, not analyst attention."
+    },
+    {
+      "id": "benign-scheduled-patch-task-system",
+      "provenance": "synthetic",
+      "fixture": "tests/fixtures/labeled/events/benign_scheduled_patch_task_system.json",
+      "expected_score_min": 1,
+      "expected_score_max": 4,
+      "expected_actions": ["mark_likely_benign", "queue_review"],
+      "expected_classification": "low",
+      "rationale": "Sysmon event 1 at 02:00: signed in-box wusa.exe launched by the Task Scheduler svchost instance as NT AUTHORITY\\SYSTEM, installing a named KB .msu from the internal patch share under the \\Corp\\PatchWindow-Monthly task. Every attribute is consistent with a scheduled patch run, and this pattern repeats monthly on every managed endpoint. The band reaches 4 and lists both actions honestly, because a SYSTEM-integrity process silently installing a package fetched over UNC is also a real abuse shape, and the only thing distinguishing the two is provenance the event does not fully prove: the parent process, the task name, and the internal share are strong but not conclusive. It must not page, since a monthly patch window would then page across the entire estate."
+    },
+    {
+      "id": "benign-ssh-publickey-internal-db",
+      "provenance": "synthetic",
+      "fixture": "tests/fixtures/labeled/events/benign_ssh_publickey_internal_db.json",
+      "expected_score_min": 1,
+      "expected_score_max": 3,
+      "expected_actions": ["mark_likely_benign"],
+      "expected_classification": "low",
+      "rationale": "Rule 5715 publickey authentication success for dbadmin on a database host, sourced from the internal jump host 10.0.1.20 on tcp/22 during business hours. Key-based authentication from the designated bastion is the intended access path, and publickey success additionally means no password was presented and so no credential could have been guessed or sprayed. No process or command line accompanies the event. What would make an SSH success worth looking at is an external source, a non-standard port, an unexpected account, or a success that follows a burst of failures, and none apply."
+    },
+    {
+      "id": "benign-windows-service-start-boot",
+      "provenance": "synthetic",
+      "fixture": "tests/fixtures/labeled/events/benign_windows_service_start_boot.json",
+      "expected_score_min": 1,
+      "expected_score_max": 2,
+      "expected_actions": ["mark_likely_benign"],
+      "expected_classification": "low",
+      "rationale": "Service Control Manager event 7036 reporting the in-box Print Spooler service entering the running state during boot, with a firedtimes count near 9000. Event 7036 is emitted for every service state transition on every Windows host and carries no attacker-controlled content beyond the service name. The security-relevant service events are 7045 and 7030, a newly installed or interactive service, or an unexpected binary path, none of which this is. A default service starting at boot is the lowest-value event a Windows endpoint produces."
+    }
+  ]
+}

@@ -407,7 +407,10 @@ def _severity_hint_for_details(details: JsonDict) -> str:
     risk_factors = set(details.get("risk_factors") or [])
     if risk_factors & {"encoded_powershell", "download_cradle", "credential_dumping_hint"}:
         return "high"
-    if risk_factors & {"public_ip", "hash_observable", "suspicious_tld", "url_with_ip"}:
+    # public_ip and hash_observable describe an observable, they do not assess it,
+    # so they must not reach "medium" — see NON_ESCALATING_RISK_FACTORS in
+    # soc/triage.py. suspicious_tld and url_with_ip are claims about the indicator.
+    if risk_factors & {"suspicious_tld", "url_with_ip"}:
         return "medium"
     if risk_factors:
         return "low"

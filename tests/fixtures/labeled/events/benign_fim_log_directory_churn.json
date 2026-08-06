@@ -1,0 +1,62 @@
+[
+  {
+    "id": "wazuh-syscheck-logdir-001",
+    "source": "wazuh",
+    "timestamp": "2026-08-05T11:15:52Z",
+    "payload": {
+      "id": "wazuh-syscheck-logdir-001",
+      "timestamp": "2026-08-05T11:15:52Z",
+      "agent": {
+        "id": "004",
+        "name": "linux-app-01",
+        "ip": "10.0.1.10",
+        "os": {
+          "name": "Ubuntu",
+          "version": "22.04.4 LTS"
+        }
+      },
+      "manager": {
+        "name": "wazuh-manager-01"
+      },
+      "rule": {
+        "id": "550",
+        "level": 7,
+        "description": "Integrity checksum changed.",
+        "groups": [
+          "ossec",
+          "syscheck",
+          "syscheck_entry_modified",
+          "syscheck_file"
+        ],
+        "firedtimes": 15726,
+        "mail": false
+      },
+      "decoder": {
+        "name": "syscheck_integrity_changed"
+      },
+      "location": "syscheck",
+      "syscheck": {
+        "path": "/var/log/appserver/application.log",
+        "mode": "realtime",
+        "event": "modified",
+        "size_before": "48219104",
+        "size_after": "48224871",
+        "md5_before": "aa11bb22cc33dd44ee55ff6677889900",
+        "md5_after": "0099887766ff55ee44dd33cc22bb11aa",
+        "uname_after": "appsvc",
+        "gname_after": "appsvc",
+        "perm_after": "rw-r-----",
+        "mtime_before": "2026-08-05T11:15:21",
+        "mtime_after": "2026-08-05T11:15:50",
+        "changed_attributes": [
+          "size",
+          "mtime",
+          "md5",
+          "sha1",
+          "sha256"
+        ]
+      },
+      "full_log": "File '/var/log/appserver/application.log' modified\nMode: realtime\nChanged attributes: size,mtime,md5,sha1,sha256"
+    }
+  }
+]

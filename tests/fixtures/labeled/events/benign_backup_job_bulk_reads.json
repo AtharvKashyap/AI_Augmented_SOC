@@ -1,0 +1,56 @@
+[
+  {
+    "id": "wazuh-backup-reads-001",
+    "source": "wazuh",
+    "timestamp": "2026-08-05T01:30:18Z",
+    "payload": {
+      "id": "wazuh-backup-reads-001",
+      "timestamp": "2026-08-05T01:30:18Z",
+      "agent": {
+        "id": "013",
+        "name": "linux-file-02",
+        "ip": "10.0.1.72",
+        "os": {
+          "name": "Rocky Linux",
+          "version": "9.4"
+        }
+      },
+      "manager": {
+        "name": "wazuh-manager-01"
+      },
+      "rule": {
+        "id": "80784",
+        "level": 3,
+        "description": "Audit: Successful read of a file in /srv/shares by the backup service account.",
+        "groups": [
+          "audit",
+          "audit_watch_read"
+        ],
+        "firedtimes": 20418,
+        "mail": false
+      },
+      "decoder": {
+        "name": "auditd"
+      },
+      "location": "/var/log/audit/audit.log",
+      "data": {
+        "audit": {
+          "type": "SYSCALL",
+          "syscall": "257",
+          "success": "yes",
+          "exe": "/usr/bin/borg",
+          "auid": "998",
+          "uid": "998",
+          "euid": "998",
+          "key": "share-read",
+          "file": {
+            "name": "/srv/shares/finance/ledger-2026-Q2.xlsx"
+          }
+        },
+        "srcuser": "svc-backup",
+        "dstuser": "svc-backup"
+      },
+      "full_log": "type=SYSCALL msg=audit(1786497018.221:90311): arch=c000003e syscall=257 success=yes exit=7 auid=998 uid=998 euid=998 comm=\"borg\" exe=\"/usr/bin/borg\" key=\"share-read\""
+    }
+  }
+]

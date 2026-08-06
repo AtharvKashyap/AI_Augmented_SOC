@@ -61,11 +61,40 @@ class TriageError(ValueError):
     """Raised when triage input or output is invalid."""
 
 
+ASSET_CRITICALITY_BOOSTS: dict[str, int] = {
+    "critical": 2,
+    "high": 1,
+}
+"""Score boost per asset criticality.
+
+`medium`, `low` and `unknown` are deliberately absent rather than mapped to 0:
+`soc/assets.py` turns both an absent row and an unrecognized value into `unknown`,
+so anything other than "no boost" there would make a gap in the inventory raise
+scores everywhere.
+"""
+
+MAX_ASSET_BOOST = 3
+"""Ceiling on the asset adjustment.
+
+Asset context amplifies evidence; it is not evidence. Left uncapped, a quiet event
+on a critical internet-facing host could reach the paging threshold on its own —
+and important hosts are exactly where routine events happen.
+"""
+
 NON_ESCALATING_RISK_FACTORS: frozenset[str] = frozenset(
     {
         "private_ip",
         "loopback_ip",
         "link_local_ip",
+        # The mirror of private_ip: local enrichment tags every global address
+        # public_ip, and score_alert_locally already adds a point for a non-private
+        # dst_ip, so boosting here counted one property twice.
+        "public_ip",
+        "reserved_ip",
+        # A hash existing is not evidence about it. This is stamped on any event
+        # carrying a checksum with no reputation lookup behind it, so every
+        # file-integrity event gained a point for free.
+        "hash_observable",
     }
 )
 """Risk factors that describe an address, not a threat.
@@ -554,7 +583,14 @@ def score_candidate_locally(
     alert_scores = [score_alert_locally(alert, []) for alert in candidate.alerts]
     score = max(alert_scores)
 
-    if len(candidate.alerts) >= 3:
+    # Distinct detections, not alert count. A Wazuh composite rule such as 5720
+    # "Multiple authentication failures" is itself a summary of the individual
+    # failures clustered beside it, so counting alerts scored the aggregate and
+    # the members it summarizes. One thing seen four times is one signal.
+    distinct_detections = {
+        (alert.rule_name or "").strip().lower() or alert.id for alert in candidate.alerts
+    }
+    if len(distinct_detections) >= 3:
         score += 1
     if len(candidate.src_ips) >= 2 or len(candidate.dst_ips) >= 2:
         score += 1
@@ -562,7 +598,38 @@ def score_candidate_locally(
         score += 1
 
     score += _enrichment_score_boost(enrichments or [])
+    score += _asset_criticality_boost(candidate)
     return _clamp_score(score)
+
+
+def _asset_criticality_boost(candidate: IncidentCandidate) -> int:
+    """Return the score adjustment for what the affected host is.
+
+    Asset criticality is frequently what separates queueing from paging, and until
+    this existed only the LLM path could see it — every keyless run, CI included,
+    scored as though the inventory were absent.
+
+    Two rules matter here. `unknown` never raises a score, because `soc/assets.py`
+    maps absent and unrecognized values to `unknown` and a missing inventory row
+    must not read as a reason to escalate. And the boost is capped below the paging
+    threshold's reach on its own: asset context amplifies real evidence rather than
+    substituting for it, or every routine event on an important host would page.
+
+    Inputs:
+        candidate: IncidentCandidate whose asset_context may name the host.
+
+    Outputs:
+        Integer boost, 0 to MAX_ASSET_BOOST.
+    """
+
+    context = getattr(candidate, "asset_context", None) or {}
+    if not isinstance(context, dict):
+        return 0
+
+    boost = ASSET_CRITICALITY_BOOSTS.get(str(context.get("criticality", "")).lower(), 0)
+    if boost and bool(context.get("internet_facing")):
+        boost += 1
+    return min(boost, MAX_ASSET_BOOST)
 
 
 def triage_result_from_llm_json(
@@ -1089,8 +1156,14 @@ def _enrichment_score_boost(enrichments: list[EnrichmentResult]) -> int:
             or "encodedcommand" in searchable
         ):
             boost += 2
-        elif severity_hint == "medium" or (risk_factors - NON_ESCALATING_RISK_FACTORS):
-            boost += 1
+        else:
+            # The guard is applied to the hint as well, not just to the raw factors.
+            # Subtracting it only from `risk_factors` let any provider bypass the
+            # invariant by setting a hint, which is exactly what LocalEnricher did:
+            # it derives "medium" from public_ip / hash_observable alone.
+            escalating = risk_factors - NON_ESCALATING_RISK_FACTORS
+            if escalating or (severity_hint == "medium" and not risk_factors):
+                boost += 1
     return min(boost, 3)
 
 

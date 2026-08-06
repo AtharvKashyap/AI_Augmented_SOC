@@ -188,6 +188,10 @@ def normalize_wazuh_event(event: RawEvent) -> Alert:
                 "data.srcuser",
                 "data.user",
                 "user.name",
+                # Real Wazuh alerts nest Windows eventdata under `data.`. The
+                # unprefixed paths are kept for pre-flattened documents.
+                "data.win.eventdata.targetUserName",
+                "data.win.eventdata.subjectUserName",
                 "win.eventdata.targetUserName",
                 "win.eventdata.subjectUserName",
                 "_source.data.user",
@@ -198,6 +202,8 @@ def normalize_wazuh_event(event: RawEvent) -> Alert:
             [
                 "data.process.name",
                 "process.name",
+                "data.win.eventdata.image",
+                "data.win.eventdata.newProcessName",
                 "win.eventdata.image",
                 "win.eventdata.newProcessName",
                 "syscheck.path",
@@ -209,6 +215,7 @@ def normalize_wazuh_event(event: RawEvent) -> Alert:
                 "data.command",
                 "data.command_line",
                 "process.command_line",
+                "data.win.eventdata.commandLine",
                 "win.eventdata.commandLine",
             ],
         ),
@@ -237,6 +244,9 @@ def normalize_security_onion_event(event: RawEvent) -> Alert:
         [
             "event.severity",
             "severity",
+            # A real Suricata EVE document nests alert fields under
+            # `suricata.eve.alert.*`; the shorter paths suit flattened documents.
+            "suricata.eve.alert.severity",
             "suricata.alert.severity",
             "alert.severity",
             "_source.event.severity",
@@ -246,6 +256,7 @@ def normalize_security_onion_event(event: RawEvent) -> Alert:
     rule_name = _first_string(
         payload,
         [
+            "suricata.eve.alert.signature",
             "suricata.alert.signature",
             "alert.signature",
             "rule.name",
@@ -257,6 +268,7 @@ def normalize_security_onion_event(event: RawEvent) -> Alert:
     rule_groups = _first_list(
         payload,
         [
+            "suricata.eve.alert.category",
             "suricata.alert.category",
             "alert.category",
             "event.category",

@@ -1,0 +1,110 @@
+[
+  {
+    "id": "pf-amb-blockburst-001",
+    "source": "openbsd_pf",
+    "timestamp": "2026-07-14T07:31:02Z",
+    "payload": {
+      "timestamp": "2026-07-14T07:31:02Z",
+      "action": "block",
+      "direction": "in",
+      "interface": "em0",
+      "rule_number": 12,
+      "protocol": "tcp",
+      "src_ip": "1.1.1.1",
+      "src_port": 44112,
+      "dst_ip": "10.0.1.5",
+      "dst_port": 22,
+      "raw_line": "Jul 14 07:31:02.114233 rule 12/(match) block in on em0: 1.1.1.1.44112 > 10.0.1.5.22: S 1001:1001(0) win 512"
+    }
+  },
+  {
+    "id": "pf-amb-blockburst-002",
+    "source": "openbsd_pf",
+    "timestamp": "2026-07-14T07:31:03Z",
+    "payload": {
+      "timestamp": "2026-07-14T07:31:03Z",
+      "action": "block",
+      "direction": "in",
+      "interface": "em0",
+      "rule_number": 12,
+      "protocol": "tcp",
+      "src_ip": "1.1.1.1",
+      "src_port": 44118,
+      "dst_ip": "10.0.1.5",
+      "dst_port": 3389,
+      "raw_line": "Jul 14 07:31:03.220911 rule 12/(match) block in on em0: 1.1.1.1.44118 > 10.0.1.5.3389: S 1002:1002(0) win 512"
+    }
+  },
+  {
+    "id": "pf-amb-blockburst-003",
+    "source": "openbsd_pf",
+    "timestamp": "2026-07-14T07:31:05Z",
+    "payload": {
+      "timestamp": "2026-07-14T07:31:05Z",
+      "action": "block",
+      "direction": "in",
+      "interface": "em0",
+      "rule_number": 12,
+      "protocol": "tcp",
+      "src_ip": "1.1.1.1",
+      "src_port": 44125,
+      "dst_ip": "10.0.1.5",
+      "dst_port": 445,
+      "raw_line": "Jul 14 07:31:05.550187 rule 12/(match) block in on em0: 1.1.1.1.44125 > 10.0.1.5.445: S 1003:1003(0) win 512"
+    }
+  },
+  {
+    "id": "pf-amb-blockburst-004",
+    "source": "openbsd_pf",
+    "timestamp": "2026-07-14T07:31:07Z",
+    "payload": {
+      "timestamp": "2026-07-14T07:31:07Z",
+      "action": "block",
+      "direction": "in",
+      "interface": "em0",
+      "rule_number": 12,
+      "protocol": "tcp",
+      "src_ip": "1.1.1.1",
+      "src_port": 44131,
+      "dst_ip": "10.0.1.5",
+      "dst_port": 5985,
+      "raw_line": "Jul 14 07:31:07.902441 rule 12/(match) block in on em0: 1.1.1.1.44131 > 10.0.1.5.5985: S 1004:1004(0) win 512"
+    }
+  },
+  {
+    "id": "pf-amb-blockburst-005",
+    "source": "openbsd_pf",
+    "timestamp": "2026-07-14T07:31:11Z",
+    "payload": {
+      "timestamp": "2026-07-14T07:31:11Z",
+      "action": "block",
+      "direction": "in",
+      "interface": "em0",
+      "rule_number": 12,
+      "protocol": "tcp",
+      "src_ip": "1.1.1.1",
+      "src_port": 44140,
+      "dst_ip": "10.0.1.5",
+      "dst_port": 8443,
+      "raw_line": "Jul 14 07:31:11.331002 rule 12/(match) block in on em0: 1.1.1.1.44140 > 10.0.1.5.8443: S 1005:1005(0) win 512"
+    }
+  },
+  {
+    "id": "pf-amb-blockburst-006",
+    "source": "openbsd_pf",
+    "timestamp": "2026-07-14T07:31:16Z",
+    "payload": {
+      "timestamp": "2026-07-14T07:31:16Z",
+      "action": "block",
+      "direction": "in",
+      "interface": "em0",
+      "rule_number": 12,
+      "protocol": "tcp",
+      "src_ip": "1.1.1.1",
+      "src_port": 44152,
+      "dst_ip": "10.0.1.5",
+      "dst_port": 1433,
+      "raw_line": "Jul 14 07:31:16.771540 rule 12/(match) block in on em0: 1.1.1.1.44152 > 10.0.1.5.1433: S 1006:1006(0) win 512"
+    }
+  }
+]

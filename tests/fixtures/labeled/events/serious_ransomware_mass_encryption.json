@@ -1,0 +1,210 @@
+[
+  {
+    "id": "wazuh-ransom-syscheck-001",
+    "source": "wazuh",
+    "timestamp": "2026-07-16T01:07:44Z",
+    "payload": {
+      "id": "wazuh-ransom-syscheck-001",
+      "timestamp": "2026-07-16T01:07:44Z",
+      "agent": {
+        "id": "052",
+        "name": "file-srv-052",
+        "ip": "10.0.6.52",
+        "os": {
+          "name": "Windows Server 2022"
+        }
+      },
+      "manager": {
+        "name": "wazuh-manager-01"
+      },
+      "rule": {
+        "id": "554",
+        "level": 12,
+        "description": "File added to the system with a known ransomware extension",
+        "groups": [
+          "ossec",
+          "syscheck",
+          "syscheck_entry_added",
+          "ransomware"
+        ],
+        "mitre": {
+          "id": [
+            "T1486"
+          ],
+          "tactic": [
+            "Impact"
+          ],
+          "technique": [
+            "Data Encrypted for Impact"
+          ]
+        }
+      },
+      "syscheck": {
+        "path": "D:\\Shares\\Finance\\Q3-forecast.xlsx.lckd",
+        "mode": "realtime",
+        "event": "added",
+        "size_after": "48219"
+      },
+      "data": {
+        "srcip": "10.0.6.52"
+      },
+      "full_log": "File 'D:\\Shares\\Finance\\Q3-forecast.xlsx.lckd' added to the file system on file-srv-052"
+    }
+  },
+  {
+    "id": "wazuh-ransom-syscheck-002",
+    "source": "wazuh",
+    "timestamp": "2026-07-16T01:07:51Z",
+    "payload": {
+      "id": "wazuh-ransom-syscheck-002",
+      "timestamp": "2026-07-16T01:07:51Z",
+      "agent": {
+        "id": "052",
+        "name": "file-srv-052",
+        "ip": "10.0.6.52",
+        "os": {
+          "name": "Windows Server 2022"
+        }
+      },
+      "rule": {
+        "id": "555",
+        "level": 12,
+        "description": "Mass file deletion and rename detected in monitored share (1842 events in 60 seconds)",
+        "groups": [
+          "ossec",
+          "syscheck",
+          "syscheck_entry_deleted",
+          "ransomware"
+        ],
+        "mitre": {
+          "id": [
+            "T1486",
+            "T1490"
+          ],
+          "tactic": [
+            "Impact"
+          ],
+          "technique": [
+            "Data Encrypted for Impact",
+            "Inhibit System Recovery"
+          ]
+        }
+      },
+      "syscheck": {
+        "path": "D:\\Shares\\Finance\\Q3-forecast.xlsx",
+        "mode": "realtime",
+        "event": "deleted"
+      },
+      "data": {
+        "srcip": "10.0.6.52",
+        "rename_count": "1842"
+      },
+      "full_log": "Mass rename/delete burst on file-srv-052: 1842 files in D:\\Shares replaced with .lckd copies within 60 seconds"
+    }
+  },
+  {
+    "id": "wazuh-ransom-note-003",
+    "source": "wazuh",
+    "timestamp": "2026-07-16T01:08:02Z",
+    "payload": {
+      "id": "wazuh-ransom-note-003",
+      "timestamp": "2026-07-16T01:08:02Z",
+      "agent": {
+        "id": "052",
+        "name": "file-srv-052",
+        "ip": "10.0.6.52",
+        "os": {
+          "name": "Windows Server 2022"
+        }
+      },
+      "rule": {
+        "id": "556",
+        "level": 13,
+        "description": "Ransom note dropped in monitored directory",
+        "groups": [
+          "ossec",
+          "syscheck",
+          "syscheck_entry_added",
+          "ransomware"
+        ],
+        "mitre": {
+          "id": [
+            "T1486"
+          ],
+          "tactic": [
+            "Impact"
+          ],
+          "technique": [
+            "Data Encrypted for Impact"
+          ]
+        }
+      },
+      "syscheck": {
+        "path": "D:\\Shares\\Finance\\HOW-TO-RESTORE-FILES.txt",
+        "mode": "realtime",
+        "event": "added",
+        "size_after": "1204"
+      },
+      "data": {
+        "srcip": "10.0.6.52"
+      },
+      "full_log": "Ransom note 'HOW-TO-RESTORE-FILES.txt' added to D:\\Shares\\Finance on file-srv-052"
+    }
+  },
+  {
+    "id": "wazuh-vss-delete-004",
+    "source": "wazuh",
+    "timestamp": "2026-07-16T01:06:58Z",
+    "payload": {
+      "id": "wazuh-vss-delete-004",
+      "timestamp": "2026-07-16T01:06:58Z",
+      "agent": {
+        "id": "052",
+        "name": "file-srv-052",
+        "ip": "10.0.6.52",
+        "os": {
+          "name": "Windows Server 2022"
+        }
+      },
+      "rule": {
+        "id": "92310",
+        "level": 12,
+        "description": "Shadow copies deleted via vssadmin",
+        "groups": [
+          "windows",
+          "sysmon",
+          "defense_evasion"
+        ],
+        "mitre": {
+          "id": [
+            "T1490"
+          ],
+          "tactic": [
+            "Impact"
+          ],
+          "technique": [
+            "Inhibit System Recovery"
+          ]
+        }
+      },
+      "data": {
+        "win": {
+          "system": {
+            "providerName": "Microsoft-Windows-Sysmon",
+            "eventID": "1",
+            "computer": "file-srv-052"
+          },
+          "eventdata": {
+            "image": "C:\\Windows\\System32\\vssadmin.exe",
+            "commandLine": "vssadmin.exe delete shadows /all /quiet",
+            "parentImage": "C:\\Users\\Public\\svchost32.exe",
+            "subjectUserName": "SYSTEM"
+          }
+        },
+        "command": "vssadmin.exe delete shadows /all /quiet",
+        "srcip": "10.0.6.52"
+      },
+      "full_log": "vssadmin.exe delete shadows /all /quiet executed on file-srv-052, parent C:\\Users\\Public\\svchost32.exe"
+    }
+  }
+]

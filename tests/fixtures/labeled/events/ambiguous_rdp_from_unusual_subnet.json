@@ -1,0 +1,63 @@
+[
+  {
+    "id": "wazuh-amb-rdp-001",
+    "source": "wazuh",
+    "timestamp": "2026-07-14T16:41:09Z",
+    "payload": {
+      "id": "wazuh-amb-rdp-001",
+      "timestamp": "2026-07-14T16:41:09Z",
+      "agent": {
+        "id": "011",
+        "name": "app-erp-01",
+        "ip": "10.0.1.55",
+        "os": {
+          "name": "Windows Server 2019"
+        }
+      },
+      "manager": {
+        "name": "wazuh-manager-01"
+      },
+      "rule": {
+        "id": "60107",
+        "level": 4,
+        "description": "Windows: Remote interactive logon (RDP) succeeded.",
+        "groups": [
+          "windows",
+          "windows_security",
+          "authentication_success",
+          "rdp"
+        ],
+        "mitre": {
+          "id": [
+            "T1021.001"
+          ],
+          "tactic": [
+            "Lateral Movement"
+          ],
+          "technique": [
+            "Remote Desktop Protocol"
+          ]
+        }
+      },
+      "data": {
+        "win": {
+          "system": {
+            "providerName": "Microsoft-Windows-Security-Auditing",
+            "eventID": "4624",
+            "computer": "app-erp-01.corp.internal"
+          },
+          "eventdata": {
+            "targetUserName": "mokafor",
+            "targetDomainName": "CORP",
+            "logonType": "10",
+            "authenticationPackageName": "Negotiate",
+            "workstationName": "WS-LAB-07",
+            "ipAddress": "10.0.9.207"
+          }
+        },
+        "srcip": "10.0.9.207"
+      },
+      "full_log": "Windows security event 4624: RemoteInteractive logon for CORP\\mokafor on app-erp-01 from 10.0.9.207 (lab subnet)"
+    }
+  }
+]

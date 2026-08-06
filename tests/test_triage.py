@@ -36,6 +36,7 @@ from soc.triage import (
     TRUNCATION_MARKER,
     TriageEngine,
     TriageError,
+    _enrichment_score_boost,
     build_alert_triage_payload,
     build_candidate_context,
     build_candidate_triage_payload,
@@ -864,3 +865,212 @@ def test_candidate_context_without_asset_context_is_still_valid():
     context = build_candidate_context(_candidate())
 
     assert context["asset_context"] in (None, {})
+
+
+def _local_enrichment(*, risk_factors: list[str], severity_hint: str) -> EnrichmentResult:
+    """Build a local enrichment result carrying chosen details.
+
+    Inputs:
+        risk_factors: Risk factor labels to record.
+        severity_hint: Severity hint to record.
+
+    Outputs:
+        EnrichmentResult whose raw details hold those values.
+    """
+
+    # `_enrichment_details` returns the first dict-valued field among details /
+    # metadata / data / raw, so these must sit directly in `raw` — nesting them
+    # under a "details" key makes them invisible and every assertion vacuous.
+    return EnrichmentResult(
+        indicator="8.8.8.8",
+        indicator_type="ip",
+        provider="local",
+        summary="local enrichment",
+        raw={"risk_factors": risk_factors, "severity_hint": severity_hint},
+    )
+
+
+def test_a_public_address_alone_does_not_boost_the_score():
+    """`public_ip` describes an address, not a threat — the mirror of `private_ip`.
+
+    Local enrichment tags every global address `public_ip`, and the hint derived
+    from it was raising the score of every alert that so much as mentions an
+    external address. Worse, `score_alert_locally` already adds a point for a
+    non-private `dst_ip`, so one property was counted twice.
+    """
+
+    boost = _enrichment_score_boost(
+        [_local_enrichment(risk_factors=["public_ip"], severity_hint="medium")]
+    )
+
+    assert boost == 0
+
+
+def test_observing_a_hash_does_not_boost_the_score():
+    """A hash existing is not evidence about it.
+
+    `hash_observable` is stamped on any event carrying a checksum, with no
+    reputation lookup behind it, so every file-integrity event gained a point for
+    free. A verdict about a hash has to come from a provider that looked it up.
+    """
+
+    boost = _enrichment_score_boost(
+        [_local_enrichment(risk_factors=["hash_observable"], severity_hint="medium")]
+    )
+
+    assert boost == 0
+
+
+def test_a_medium_hint_cannot_bypass_the_non_escalating_guard():
+    """The guard must hold at this boundary regardless of what a provider sends.
+
+    `NON_ESCALATING_RISK_FACTORS` was subtracted from the risk factors, but the
+    `severity_hint == "medium"` disjunct short-circuited before that mattered — so
+    any provider could bypass the invariant just by setting a hint. CLAUDE.md
+    requires this enforced at the boundary rather than left to each provider.
+    """
+
+    boost = _enrichment_score_boost(
+        [
+            _local_enrichment(
+                risk_factors=["public_ip", "private_ip", "hash_observable"],
+                severity_hint="medium",
+            )
+        ]
+    )
+
+    assert boost == 0
+
+
+def test_a_genuinely_suspicious_factor_still_boosts():
+    """The guard must not become a blanket suppression of enrichment.
+
+    `suspicious_tld` is a claim about the indicator, not a description of it.
+    """
+
+    boost = _enrichment_score_boost(
+        [_local_enrichment(risk_factors=["suspicious_tld"], severity_hint="medium")]
+    )
+
+    assert boost == 1
+
+
+def test_a_high_hint_still_boosts_even_alongside_non_escalating_factors():
+    """A real escalating signal must survive the guard.
+
+    Encoded PowerShell to an external address is the case this whole path exists
+    for; suppressing it because `public_ip` rode along would be the opposite bug.
+    """
+
+    boost = _enrichment_score_boost(
+        [
+            _local_enrichment(
+                risk_factors=["encoded_powershell", "public_ip"], severity_hint="high"
+            )
+        ]
+    )
+
+    assert boost == 2
+
+
+def _quiet_alert(alert_id: str, *, rule_name: str) -> Alert:
+    """Create a low-severity alert with no keyword-triggering content.
+
+    Inputs:
+        alert_id: Alert ID.
+        rule_name: Rule name, which is also how repeated-vs-distinct is judged.
+
+    Outputs:
+        Alert with nothing in it that the keyword lists react to.
+    """
+
+    return _alert(
+        alert_id=alert_id,
+        severity=AlertSeverity.LOW,
+        rule_name=rule_name,
+        command_line=None,
+        process_name=None,
+        dst_ip=None,
+    )
+
+
+def test_repeating_one_detection_is_not_three_independent_signals():
+    """The cluster-size bonus counted alerts, so a burst double-counted itself.
+
+    A Wazuh composite rule such as 5720 "Multiple authentication failures" is
+    itself a summary of the individual failures clustered alongside it. Scoring
+    `max(alert_scores)` and then adding a point for cluster size counts the
+    aggregate *and* the members it summarizes, which turned a service account with
+    an expired credential into a page.
+    """
+
+    repeated = [_quiet_alert(f"a-{i}", rule_name="sshd: authentication failed") for i in range(4)]
+
+    assert score_candidate_locally(_candidate(repeated)) == score_candidate_locally(
+        _candidate(repeated[:1])
+    )
+
+
+def test_three_distinct_detections_still_earn_the_cluster_bonus():
+    """Independent detections agreeing is the signal the bonus exists for.
+
+    The fix must distinguish "one thing seen four times" from "three different
+    things seen once", not suppress clustering value in general.
+    """
+
+    distinct = _candidate(
+        [
+            _quiet_alert("a-1", rule_name="sshd: authentication failed"),
+            _quiet_alert("a-2", rule_name="New service installed"),
+            _quiet_alert("a-3", rule_name="Scheduled task created"),
+        ]
+    )
+    single = _candidate([_quiet_alert("a-1", rule_name="sshd: authentication failed")])
+
+    assert score_candidate_locally(distinct) > score_candidate_locally(single)
+
+
+def test_asset_criticality_raises_the_score_of_a_candidate():
+    """Phase 3 loads asset criticality and the local scorer ignored it.
+
+    `soc/pipeline.py:_attach_asset_context` says in its own docstring that asset
+    criticality is often what separates queueing from paging — and then only the
+    LLM path could see it. Every keyless run, including CI, scored as though the
+    inventory did not exist.
+    """
+
+    baseline = _candidate([_quiet_alert("a-1", rule_name="Interactive logon")])
+    on_critical_asset = _candidate([_quiet_alert("a-1", rule_name="Interactive logon")])
+    on_critical_asset.asset_context = {"hostname": "endpoint-01", "criticality": "critical"}
+
+    assert score_candidate_locally(on_critical_asset) > score_candidate_locally(baseline)
+
+
+def test_low_and_unknown_criticality_do_not_raise_the_score():
+    """Bad or absent inventory data degrades, it does not escalate.
+
+    `soc/assets.py` states that an unrecognized criticality becomes `unknown`, so
+    treating `unknown` as a reason to raise a score would turn a missing inventory
+    row into a score increase everywhere.
+    """
+
+    baseline = score_candidate_locally(_candidate([_quiet_alert("a-1", rule_name="Logon")]))
+
+    for criticality in ("unknown", "low", "medium"):
+        candidate = _candidate([_quiet_alert("a-1", rule_name="Logon")])
+        candidate.asset_context = {"criticality": criticality}
+        assert score_candidate_locally(candidate) == baseline, criticality
+
+
+def test_asset_criticality_alone_cannot_manufacture_a_page():
+    """A quiet alert on a critical host is worth attention, not a 3am phone call.
+
+    Asset context is an amplifier of real evidence, not evidence itself. Letting it
+    reach the paging threshold on its own would page on every routine event
+    occurring on the most important hosts, which is where routine events happen.
+    """
+
+    candidate = _candidate([_quiet_alert("a-1", rule_name="Routine logon")])
+    candidate.asset_context = {"criticality": "critical", "internet_facing": True}
+
+    assert score_candidate_locally(candidate) < 8

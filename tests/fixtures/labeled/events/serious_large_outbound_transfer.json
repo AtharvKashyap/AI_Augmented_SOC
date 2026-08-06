@@ -1,0 +1,167 @@
+[
+  {
+    "id": "so-zeek-conn-exfil-001",
+    "source": "security_onion",
+    "timestamp": "2026-07-23T03:18:22Z",
+    "payload": {
+      "event": {
+        "id": "so-zeek-conn-exfil-001",
+        "module": "zeek",
+        "dataset": "zeek.conn",
+        "kind": "event",
+        "category": "network",
+        "severity": 2
+      },
+      "@timestamp": "2026-07-23T03:18:22Z",
+      "source": {
+        "ip": "10.0.6.52",
+        "port": 52210,
+        "bytes": 8794321408
+      },
+      "destination": {
+        "ip": "8.8.8.8",
+        "port": 443,
+        "bytes": 918204
+      },
+      "host": {
+        "name": "securityonion-sensor-01"
+      },
+      "network": {
+        "protocol": "tls",
+        "transport": "tcp",
+        "direction": "outbound",
+        "bytes": 8795239612
+      },
+      "zeek": {
+        "conn": {
+          "uid": "CzExampleConnUid01",
+          "duration": 4021.4,
+          "orig_bytes": 8794321408,
+          "resp_bytes": 918204,
+          "conn_state": "SF",
+          "service": "ssl"
+        }
+      },
+      "message": "Zeek conn: 8.79 GB uploaded from 10.0.6.52 to 8.8.8.8:443 over 67 minutes, no prior egress baseline for this host"
+    }
+  },
+  {
+    "id": "so-suricata-exfil-sig-002",
+    "source": "security_onion",
+    "timestamp": "2026-07-23T03:18:40Z",
+    "payload": {
+      "event": {
+        "id": "so-suricata-exfil-sig-002",
+        "module": "suricata",
+        "dataset": "suricata.eve",
+        "kind": "alert",
+        "category": "network"
+      },
+      "@timestamp": "2026-07-23T03:18:40Z",
+      "source": {
+        "ip": "10.0.6.52",
+        "port": 52210
+      },
+      "destination": {
+        "ip": "8.8.8.8",
+        "port": 443
+      },
+      "host": {
+        "name": "securityonion-sensor-01"
+      },
+      "network": {
+        "protocol": "tls",
+        "transport": "tcp",
+        "direction": "outbound"
+      },
+      "suricata": {
+        "eve": {
+          "event_type": "alert",
+          "alert": {
+            "signature_id": 2027260,
+            "signature": "ET POLICY Large Outbound Data Transfer to Unrecognized External Host",
+            "category": "Potentially Bad Traffic",
+            "severity": 2
+          },
+          "flow": {
+            "pkts_toserver": 6421004,
+            "pkts_toclient": 812440,
+            "bytes_toserver": 8794321408,
+            "bytes_toclient": 918204
+          }
+        }
+      },
+      "message": "ET POLICY Large Outbound Data Transfer to Unrecognized External Host from 10.0.6.52 to 8.8.8.8"
+    }
+  },
+  {
+    "id": "wazuh-archive-staged-003",
+    "source": "wazuh",
+    "timestamp": "2026-07-23T03:05:11Z",
+    "payload": {
+      "id": "wazuh-archive-staged-003",
+      "timestamp": "2026-07-23T03:05:11Z",
+      "agent": {
+        "id": "052",
+        "name": "file-srv-052",
+        "ip": "10.0.6.52",
+        "os": {
+          "name": "Windows Server 2022"
+        }
+      },
+      "manager": {
+        "name": "wazuh-manager-01"
+      },
+      "rule": {
+        "id": "92420",
+        "level": 10,
+        "description": "Large password-protected archive created in a temporary directory from a monitored file share",
+        "groups": [
+          "windows",
+          "sysmon",
+          "collection"
+        ],
+        "mitre": {
+          "id": [
+            "T1560.001"
+          ],
+          "tactic": [
+            "Collection"
+          ],
+          "technique": [
+            "Archive via Utility"
+          ]
+        }
+      },
+      "syscheck": {
+        "path": "C:\\Windows\\Temp\\bk.7z",
+        "event": "added",
+        "size_after": "8794321408"
+      },
+      "data": {
+        "command": "7z.exe a -mhe=on -pfake-password-do-not-report C:\\Windows\\Temp\\bk.7z D:\\Shares\\Finance D:\\Shares\\HR",
+        "srcip": "10.0.6.52"
+      },
+      "full_log": "7z.exe created an 8.79 GB encrypted archive C:\\Windows\\Temp\\bk.7z from D:\\Shares\\Finance and D:\\Shares\\HR on file-srv-052"
+    }
+  },
+  {
+    "id": "pf-pass-out-exfil-004",
+    "source": "openbsd_pf",
+    "timestamp": "2026-07-23T03:18:23Z",
+    "payload": {
+      "timestamp": "2026-07-23T03:18:23Z",
+      "action": "pass",
+      "direction": "out",
+      "interface": "em0",
+      "rule_number": "12",
+      "protocol": "tcp",
+      "src_ip": "10.0.6.52",
+      "src_port": 52210,
+      "dst_ip": "8.8.8.8",
+      "dst_port": 443,
+      "hostname": "pf-edge-01",
+      "raw_line": "rule 12/(match) pass out on em0: 10.0.6.52.52210 > 8.8.8.8.443: tcp"
+    }
+  }
+]

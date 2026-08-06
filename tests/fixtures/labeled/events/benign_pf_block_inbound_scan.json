@@ -1,0 +1,21 @@
+[
+  {
+    "id": "pf-block-inbound-scan-001",
+    "source": "openbsd_pf",
+    "timestamp": "2026-08-05T04:18:27Z",
+    "payload": {
+      "timestamp": "2026-08-05T04:18:27+00:00",
+      "action": "block",
+      "direction": "in",
+      "interface": "em0",
+      "rule_number": "12",
+      "protocol": "tcp",
+      "src_ip": "8.8.8.8",
+      "src_port": "44921",
+      "dst_ip": "10.0.1.5",
+      "dst_port": "23",
+      "hostname": "obsd-fw-01",
+      "raw_line": "Aug 05 04:18:27.481902 rule 12/(match) block in on em0: 8.8.8.8.44921 > 10.0.1.5.23: S 2914881:2914881(0) win 1024"
+    }
+  }
+]

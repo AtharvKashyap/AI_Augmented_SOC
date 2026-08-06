@@ -1,0 +1,67 @@
+[
+  {
+    "id": "so-suricata-c2-beacon-001",
+    "source": "security_onion",
+    "timestamp": "2026-07-19T06:12:03Z",
+    "payload": {
+      "event": {
+        "id": "so-suricata-c2-beacon-001",
+        "module": "suricata",
+        "dataset": "suricata.eve",
+        "kind": "alert",
+        "category": "network"
+      },
+      "@timestamp": "2026-07-19T06:12:03Z",
+      "source": {
+        "ip": "10.0.5.88",
+        "port": 49911
+      },
+      "destination": {
+        "ip": "1.1.1.1",
+        "port": 443
+      },
+      "host": {
+        "name": "securityonion-sensor-02"
+      },
+      "network": {
+        "protocol": "tls",
+        "transport": "tcp",
+        "direction": "outbound"
+      },
+      "suricata": {
+        "eve": {
+          "event_type": "alert",
+          "alert": {
+            "signature_id": 2036800,
+            "signature": "ET TROJAN Cobalt Strike Beacon Observed CheckIn (set)",
+            "category": "Malware Command and Control Activity Detected",
+            "severity": 1,
+            "metadata": {
+              "attack_target": [
+                "Client_Endpoint"
+              ],
+              "mitre_technique_id": [
+                "T1071.001"
+              ]
+            }
+          },
+          "flow": {
+            "pkts_toserver": 6,
+            "pkts_toclient": 5,
+            "bytes_toserver": 812,
+            "bytes_toclient": 604,
+            "start": "2026-07-19T06:12:02.881Z"
+          },
+          "tls": {
+            "sni": "cdn-metrics-sync.example.org",
+            "ja3": {
+              "hash": "fake-ja3-do-not-report"
+            },
+            "version": "TLS 1.2"
+          }
+        }
+      },
+      "message": "ET TROJAN Cobalt Strike Beacon Observed CheckIn (set) from 10.0.5.88 to 1.1.1.1 - 41st check-in at a 60s interval with 5s jitter"
+    }
+  }
+]

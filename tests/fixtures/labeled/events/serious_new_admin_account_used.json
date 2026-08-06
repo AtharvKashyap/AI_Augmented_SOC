@@ -1,0 +1,177 @@
+[
+  {
+    "id": "wazuh-4720-user-created-001",
+    "source": "wazuh",
+    "timestamp": "2026-07-21T23:41:02Z",
+    "payload": {
+      "id": "wazuh-4720-user-created-001",
+      "timestamp": "2026-07-21T23:41:02Z",
+      "agent": {
+        "id": "003",
+        "name": "dc-prod-003",
+        "ip": "10.0.1.3",
+        "os": {
+          "name": "Windows Server 2019"
+        }
+      },
+      "manager": {
+        "name": "wazuh-manager-01"
+      },
+      "rule": {
+        "id": "60109",
+        "level": 8,
+        "description": "Windows: A user account was created",
+        "groups": [
+          "windows",
+          "account_changed",
+          "adduser"
+        ],
+        "mitre": {
+          "id": [
+            "T1136.001"
+          ],
+          "tactic": [
+            "Persistence"
+          ],
+          "technique": [
+            "Local Account"
+          ]
+        }
+      },
+      "data": {
+        "win": {
+          "system": {
+            "providerName": "Microsoft-Windows-Security-Auditing",
+            "eventID": "4720",
+            "computer": "dc-prod-003"
+          },
+          "eventdata": {
+            "targetUserName": "helpdesk_svc2",
+            "subjectUserName": "mrivera"
+          }
+        },
+        "dstuser": "helpdesk_svc2",
+        "srcuser": "mrivera",
+        "srcip": "10.0.1.3"
+      },
+      "full_log": "Windows EventID 4720: account 'helpdesk_svc2' created by 'mrivera' on dc-prod-003 at 23:41 local"
+    }
+  },
+  {
+    "id": "wazuh-4732-admin-added-002",
+    "source": "wazuh",
+    "timestamp": "2026-07-21T23:41:19Z",
+    "payload": {
+      "id": "wazuh-4732-admin-added-002",
+      "timestamp": "2026-07-21T23:41:19Z",
+      "agent": {
+        "id": "003",
+        "name": "dc-prod-003",
+        "ip": "10.0.1.3",
+        "os": {
+          "name": "Windows Server 2019"
+        }
+      },
+      "rule": {
+        "id": "60138",
+        "level": 12,
+        "description": "Windows: A member was added to the local Administrators group",
+        "groups": [
+          "windows",
+          "account_changed",
+          "privilege_escalation"
+        ],
+        "mitre": {
+          "id": [
+            "T1098"
+          ],
+          "tactic": [
+            "Persistence",
+            "Privilege Escalation"
+          ],
+          "technique": [
+            "Account Manipulation"
+          ]
+        }
+      },
+      "data": {
+        "win": {
+          "system": {
+            "providerName": "Microsoft-Windows-Security-Auditing",
+            "eventID": "4732",
+            "computer": "dc-prod-003"
+          },
+          "eventdata": {
+            "targetUserName": "Administrators",
+            "memberSid": "S-1-5-21-0-0-0-1174",
+            "subjectUserName": "mrivera"
+          }
+        },
+        "dstuser": "helpdesk_svc2",
+        "srcuser": "mrivera",
+        "srcip": "10.0.1.3"
+      },
+      "full_log": "Windows EventID 4732: 'helpdesk_svc2' added to Administrators by 'mrivera' on dc-prod-003, 17 seconds after account creation"
+    }
+  },
+  {
+    "id": "wazuh-4624-type10-logon-003",
+    "source": "wazuh",
+    "timestamp": "2026-07-21T23:42:07Z",
+    "payload": {
+      "id": "wazuh-4624-type10-logon-003",
+      "timestamp": "2026-07-21T23:42:07Z",
+      "agent": {
+        "id": "003",
+        "name": "dc-prod-003",
+        "ip": "10.0.1.3",
+        "os": {
+          "name": "Windows Server 2019"
+        }
+      },
+      "rule": {
+        "id": "60106",
+        "level": 9,
+        "description": "Windows: Successful RemoteInteractive logon by a newly created privileged account",
+        "groups": [
+          "windows",
+          "authentication_success",
+          "lateral_movement"
+        ],
+        "mitre": {
+          "id": [
+            "T1078.002",
+            "T1021.001"
+          ],
+          "tactic": [
+            "Defense Evasion",
+            "Lateral Movement"
+          ],
+          "technique": [
+            "Domain Accounts",
+            "Remote Desktop Protocol"
+          ]
+        }
+      },
+      "data": {
+        "win": {
+          "system": {
+            "providerName": "Microsoft-Windows-Security-Auditing",
+            "eventID": "4624",
+            "computer": "dc-prod-003"
+          },
+          "eventdata": {
+            "targetUserName": "helpdesk_svc2",
+            "logonType": "10",
+            "ipAddress": "10.0.4.31",
+            "authenticationPackageName": "Negotiate"
+          }
+        },
+        "dstuser": "helpdesk_svc2",
+        "srcip": "10.0.4.31",
+        "dstip": "10.0.1.3"
+      },
+      "full_log": "Windows EventID 4624: logon type 10 (RDP) for 'helpdesk_svc2' from 10.0.4.31 to dc-prod-003, 65 seconds after the account was granted Administrators"
+    }
+  }
+]

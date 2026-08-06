@@ -1,0 +1,51 @@
+[
+  {
+    "id": "wazuh-amb-offhours-001",
+    "source": "wazuh",
+    "timestamp": "2026-07-15T03:12:57Z",
+    "payload": {
+      "id": "wazuh-amb-offhours-001",
+      "timestamp": "2026-07-15T03:12:57Z",
+      "agent": {
+        "id": "008",
+        "name": "fs-finance-01",
+        "ip": "10.0.1.31",
+        "os": {
+          "name": "Windows Server 2022"
+        }
+      },
+      "manager": {
+        "name": "wazuh-manager-01"
+      },
+      "rule": {
+        "id": "60106",
+        "level": 3,
+        "description": "Windows logon success.",
+        "groups": [
+          "windows",
+          "windows_security",
+          "authentication_success"
+        ]
+      },
+      "data": {
+        "win": {
+          "system": {
+            "providerName": "Microsoft-Windows-Security-Auditing",
+            "eventID": "4624",
+            "computer": "fs-finance-01.corp.internal"
+          },
+          "eventdata": {
+            "targetUserName": "dfinch",
+            "targetDomainName": "CORP",
+            "logonType": "3",
+            "authenticationPackageName": "Kerberos",
+            "workstationName": "WS-FIN-114",
+            "ipAddress": "10.0.3.114"
+          }
+        },
+        "srcip": "10.0.3.114"
+      },
+      "full_log": "Windows security event 4624: successful network logon for CORP\\dfinch on fs-finance-01 from 10.0.3.114 at 03:12 local time"
+    }
+  }
+]

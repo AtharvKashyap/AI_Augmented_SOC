@@ -1,0 +1,65 @@
+[
+  {
+    "id": "wazuh-amb-psgithub-001",
+    "source": "wazuh",
+    "timestamp": "2026-07-14T11:04:12Z",
+    "payload": {
+      "id": "wazuh-amb-psgithub-001",
+      "timestamp": "2026-07-14T11:04:12Z",
+      "agent": {
+        "id": "027",
+        "name": "endpoint-27",
+        "ip": "10.0.3.27",
+        "os": {
+          "name": "Windows 11"
+        }
+      },
+      "manager": {
+        "name": "wazuh-manager-01"
+      },
+      "rule": {
+        "id": "92052",
+        "level": 8,
+        "description": "PowerShell process downloaded content from a remote host.",
+        "groups": [
+          "windows",
+          "sysmon",
+          "sysmon_event1",
+          "powershell"
+        ],
+        "mitre": {
+          "id": [
+            "T1105",
+            "T1059.001"
+          ],
+          "tactic": [
+            "Command and Control",
+            "Execution"
+          ],
+          "technique": [
+            "Ingress Tool Transfer",
+            "PowerShell"
+          ]
+        }
+      },
+      "data": {
+        "win": {
+          "system": {
+            "providerName": "Microsoft-Windows-Sysmon",
+            "eventID": "1",
+            "computer": "endpoint-27"
+          },
+          "eventdata": {
+            "subjectUserName": "kmorales",
+            "image": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+            "parentImage": "C:\\Program Files\\Microsoft VS Code\\Code.exe",
+            "commandLine": "powershell.exe -NoProfile -Command \"Invoke-WebRequest -Uri https://raw.githubusercontent.com/some-org/ops-tools/main/setup.ps1 -OutFile $env:TEMP\\setup.ps1; . $env:TEMP\\setup.ps1\"",
+            "currentDirectory": "C:\\Users\\kmorales\\src\\"
+          }
+        },
+        "srcip": "10.0.3.27"
+      },
+      "full_log": "Sysmon event 1: powershell.exe fetched https://raw.githubusercontent.com/some-org/ops-tools/main/setup.ps1 for user kmorales on endpoint-27"
+    }
+  }
+]
