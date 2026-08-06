@@ -13,8 +13,10 @@ order-dependent.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -918,3 +920,217 @@ def test_generate_prefers_report_model_and_states_model_provenance(tmp_path, mon
     assert "A model wrote this summary." in report_text
     assert "vendor/report-model" in report_text
     assert "model-drafted" in capsys.readouterr().out
+
+
+class FakeSplunkClient:
+    """Splunk client recording what it was asked to send.
+
+    Attributes:
+        pushed: Incidents passed to `send_incidents`, across all instances.
+    """
+
+    pushed: list[Incident] = []
+
+    @classmethod
+    def from_settings(cls, settings: Any) -> FakeSplunkClient:
+        """Build a recording client the way the real one is built.
+
+        Inputs:
+            settings: Application settings, unused.
+
+        Outputs:
+            A recording client.
+        """
+
+        return cls()
+
+    def send_incidents(self, incidents: Sequence[Incident]) -> int:
+        """Record the incidents and report them all as sent.
+
+        Inputs:
+            incidents: Incidents to send.
+
+        Outputs:
+            Number of events sent.
+        """
+
+        type(self).pushed.extend(incidents)
+        return len(incidents)
+
+
+def _generate_args(incident_id: str, tmp_path: Path, db_path: Path, env_file: Path,
+                   *, extra: list[str] | None = None) -> list[str]:
+    """Build a `generate` argument list.
+
+    Inputs:
+        incident_id: Incident to report on.
+        tmp_path: Pytest temporary directory, for the output path.
+        db_path: Database path.
+        env_file: Env file path.
+        extra: Additional flags.
+
+    Outputs:
+        Argument list for `build_parser().parse_args`.
+    """
+
+    return [
+        "generate",
+        incident_id,
+        "--no-llm",
+        "--output",
+        str(tmp_path / "reports" / "incident.md"),
+        "--db",
+        str(db_path),
+        "--env-file",
+        str(env_file),
+        *(extra or []),
+    ]
+
+
+def test_generate_pushes_the_incident_summary_to_splunk(tmp_path, monkeypatch):
+    """Milestone 4.4 deferred report export until Splunk output existed.
+
+    Only the incident summary is sent, never the report body: the Markdown is
+    already written to disk and emailable, and a Splunk index should not become a
+    store of narrative documents.
+    """
+
+    store, db_path, env_file = _store(tmp_path)
+    _seed_incident(
+        store,
+        "INC-20260610-001-aaaa",
+        candidate_id="CAND-20260610-001-aaaa",
+        created_at=BASE_TIME,
+    )
+    monkeypatch.setattr(FakeSplunkClient, "pushed", [])
+    monkeypatch.setattr(run_report, "SplunkClient", FakeSplunkClient)
+
+    summary = run_from_args(
+        build_parser().parse_args(
+            _generate_args("INC-20260610-001-aaaa", tmp_path, db_path, env_file,
+                           extra=["--splunk"])
+        )
+    )
+
+    assert summary["splunk_events_sent"] == 1
+    assert [incident.id for incident in FakeSplunkClient.pushed] == ["INC-20260610-001-aaaa"]
+
+
+def test_generate_without_splunk_builds_no_client(tmp_path, monkeypatch):
+    """Sending SOC data to a third-party index stays opt-in."""
+
+    store, db_path, env_file = _store(tmp_path)
+    _seed_incident(
+        store,
+        "INC-20260610-001-aaaa",
+        candidate_id="CAND-20260610-001-aaaa",
+        created_at=BASE_TIME,
+    )
+
+    class Forbidden:
+        """Client that fails if the CLI ever builds it unasked."""
+
+        @classmethod
+        def from_settings(cls, settings: Any) -> Forbidden:
+            """Fail the test.
+
+            Inputs:
+                settings: Application settings, unused.
+
+            Outputs:
+                Never returns.
+            """
+
+            raise AssertionError("Splunk client must not be built without --splunk")
+
+    monkeypatch.setattr(run_report, "SplunkClient", Forbidden)
+
+    summary = run_from_args(
+        build_parser().parse_args(
+            _generate_args("INC-20260610-001-aaaa", tmp_path, db_path, env_file)
+        )
+    )
+
+    assert "splunk_events_sent" not in summary
+
+
+def test_a_splunk_failure_does_not_lose_the_written_report(tmp_path, monkeypatch):
+    """The report is on disk before the push runs, so a push failure is not fatal.
+
+    Failing the run here would tell an operator the report was not produced when
+    it was, which is worse than a recorded export failure.
+    """
+
+    store, db_path, env_file = _store(tmp_path)
+    _seed_incident(
+        store,
+        "INC-20260610-001-aaaa",
+        candidate_id="CAND-20260610-001-aaaa",
+        created_at=BASE_TIME,
+    )
+
+    class Failing:
+        """Client whose send always fails."""
+
+        @classmethod
+        def from_settings(cls, settings: Any) -> Failing:
+            """Build the failing client.
+
+            Inputs:
+                settings: Application settings, unused.
+
+            Outputs:
+                A failing client.
+            """
+
+            return cls()
+
+        def send_incidents(self, incidents: Sequence[Incident]) -> int:
+            """Fail the push.
+
+            Inputs:
+                incidents: Incidents to send.
+
+            Outputs:
+                Never returns.
+            """
+
+            raise RuntimeError("hec endpoint refused the batch")
+
+    monkeypatch.setattr(run_report, "SplunkClient", Failing)
+
+    summary = run_from_args(
+        build_parser().parse_args(
+            _generate_args("INC-20260610-001-aaaa", tmp_path, db_path, env_file,
+                           extra=["--splunk"])
+        )
+    )
+
+    assert Path(summary["output_path"]).exists()
+    assert summary["splunk_events_sent"] == 0
+    assert "hec endpoint refused" in summary["splunk_error"]
+
+
+def test_requesting_splunk_without_configuration_fails_loudly(tmp_path, monkeypatch, capsys):
+    """An unconfigured `--splunk` must not be silently downgraded to no export.
+
+    `SplunkClient.from_settings` *raises* rather than returning None, so this goes
+    through `main` to prove the failure is reported as `error: ...` and not as a
+    traceback. An earlier version of this test faked a None return and so only
+    exercised a branch the real client can never take.
+    """
+
+    store, db_path, env_file = _store(tmp_path)
+    _seed_incident(
+        store,
+        "INC-20260610-001-aaaa",
+        candidate_id="CAND-20260610-001-aaaa",
+        created_at=BASE_TIME,
+    )
+
+    exit_code = main(
+        _generate_args("INC-20260610-001-aaaa", tmp_path, db_path, env_file, extra=["--splunk"])
+    )
+
+    assert exit_code == 1
+    assert "SPLUNK_HEC_URL" in capsys.readouterr().err

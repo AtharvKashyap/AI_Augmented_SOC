@@ -1,0 +1,9 @@
+{
+  "name": "pf-block-malicious-ip",
+  "action": "pf_block_ip",
+  "required_confidence": 9,
+  "requires_confirmation": true,
+  "enabled": true,
+  "trigger_actions": ["page_now"],
+  "description": "Add a model-confirmed malicious external address to the controlled pf block table. Requires a named analyst; the framework additionally refuses any target that is not publicly routable, since blocking internal space could cut off the network the firewall protects."
+}

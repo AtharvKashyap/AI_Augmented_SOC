@@ -43,6 +43,7 @@ from soc.notifier import (
 )
 from soc.openrouter_client import OpenRouterClient, OpenRouterError
 from soc.report import ReportError, create_incident_report, write_report_file
+from soc.splunk_client import SplunkClient, SplunkError
 from soc.store import SQLiteStore, StoreError
 
 JsonDict = dict[str, Any]
@@ -134,6 +135,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Force the deterministic renderer even when an API key is configured.",
     )
     generate_parser.add_argument(
+        "--splunk",
+        action="store_true",
+        help=(
+            "Send the incident summary to Splunk HEC. The report body is not sent; "
+            "it is written to disk and can be emailed with --email."
+        ),
+    )
+    generate_parser.add_argument(
         "--email",
         action="store_true",
         help="Email the report as a Markdown attachment as well as writing the file.",
@@ -182,7 +191,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     try:
         run_from_args(args)
-    except (CliError, ConfigError, StoreError, ReportError) as exc:
+    except (CliError, ConfigError, StoreError, ReportError, SplunkError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
@@ -401,6 +410,9 @@ def _run_generate(store: SQLiteStore, args: argparse.Namespace, settings: Any) -
         "email": bool(args.email),
     }
 
+    if getattr(args, "splunk", False):
+        summary.update(_push_incident_to_splunk(settings, incident))
+
     if args.email:
         summary["notifications"] = _send_report_email(
             settings,
@@ -509,6 +521,41 @@ def _ensure_provenance_footer(markdown: str, narrative_mode: str, narrative_mode
 
     footer = f"_Narrative provenance: {_provenance_sentence(narrative_mode, narrative_model)}._"
     return markdown.rstrip() + "\n\n" + footer + "\n"
+
+
+def _push_incident_to_splunk(settings: Any, incident: Any) -> JsonDict:
+    """Send one incident summary to Splunk HEC.
+
+    Only the incident summary goes out. The report body stays local: it is
+    already written to disk and can be emailed, and a Splunk index is the wrong
+    place to accumulate narrative documents.
+
+    A send that fails is recorded rather than raised. By the time this runs the
+    report file exists, so failing the command would tell an operator the report
+    was not produced when it was.
+
+    Inputs:
+        settings: Application settings carrying the HEC URL and token.
+        incident: Incident to summarize.
+
+    Outputs:
+        Summary fields describing the export.
+
+    Raises:
+        CliError: If `--splunk` was requested but HEC is not configured. An
+        unconfigured export must not be silently downgraded to no export.
+    """
+
+    # from_settings raises SplunkError when unconfigured rather than returning None,
+    # and main reports that as `error: ...`. Requesting an export that cannot happen
+    # must fail loudly, not silently become no export.
+    client = SplunkClient.from_settings(settings)
+
+    try:
+        sent = client.send_incidents([incident])
+    except Exception as exc:  # any transport failure is non-fatal here
+        return {"splunk_events_sent": 0, "splunk_error": str(exc)}
+    return {"splunk_events_sent": int(sent)}
 
 
 def _send_report_email(

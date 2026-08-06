@@ -26,9 +26,11 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final
+from typing import Any, Final
 
 from dotenv import load_dotenv
+
+from soc.wazuh_indexer_client import INDEXER_ALERT_SOURCE
 
 DEFAULT_ENV_FILE: Final[Path] = Path(".env")
 
@@ -57,7 +59,7 @@ class Settings:
     wazuh_manager_user: str
     wazuh_manager_password: str
     wazuh_manager_verify_tls: bool
-    # Deprecated/optional Indexer fields kept for backward-compatible loading.
+    # Wazuh Indexer (OpenSearch) fields, used when WAZUH_ALERT_SOURCE=indexer.
     wazuh_indexer_url: str
     wazuh_indexer_user: str
     wazuh_indexer_password: str
@@ -128,6 +130,13 @@ class Settings:
     splunk_hec_token: str
     splunk_hec_index: str
     splunk_hec_sourcetype: str
+    splunk_search_url: str
+    splunk_search_token: str
+    splunk_search_query: str
+    splunk_search_earliest: str
+    splunk_search_latest: str
+    splunk_search_limit: int
+    splunk_search_verify_tls: bool
 
     # Later phase: OpenBSD firewall integration
     openbsd_pf_enabled: bool
@@ -142,6 +151,13 @@ class Settings:
     # Path for the same reason as asset_inventory_path.
     openbsd_pflog_text_path: str
     openbsd_pf_block_table: str
+    # One switch per capability, all defaulting to False. Blocking an external
+    # address at the firewall and dropping an endpoint off the network are
+    # different risks, so enabling one must never imply another.
+    response_pf_block_enabled: bool
+    response_wazuh_firewall_drop_enabled: bool
+    response_wazuh_host_deny_enabled: bool
+    playbook_dir: str
 
     def ensure_directories(self) -> None:
         """Create local runtime directories if they do not already exist.
@@ -174,10 +190,13 @@ class Settings:
         if self.wazuh_alert_source == "json_logs":
             self.validate_wazuh_json_logs()
             return
+        if self.wazuh_alert_source == INDEXER_ALERT_SOURCE:
+            self.validate_wazuh_indexer()
+            return
 
         raise ConfigError(
             "Unsupported Wazuh alert source: "
-            f"{self.wazuh_alert_source}. Supported value: json_logs"
+            f"{self.wazuh_alert_source}. Supported values: json_logs, {INDEXER_ALERT_SOURCE}"
         )
 
     def validate_wazuh_json_logs(self) -> None:
@@ -196,6 +215,27 @@ class Settings:
         if self.wazuh_alert_json_path == Path(""):
             raise ConfigError("Missing required environment variable: WAZUH_ALERT_JSON_PATH")
 
+
+    def validate_wazuh_indexer(self) -> None:
+        """Validate Wazuh Indexer settings required for indexer ingestion.
+
+        Opt-in like every other validator here, so replay mode and the json_logs
+        source keep working with these keys empty. It is the check to call before
+        building `soc.wazuh_indexer_client.WazuhIndexerClient` from settings.
+
+        Inputs:
+            None. Uses the Wazuh Indexer fields from this settings object.
+
+        Outputs:
+            None.
+
+        Raises:
+            ConfigError: If a required Wazuh Indexer setting is missing.
+        """
+
+        _require_non_empty("WAZUH_INDEXER_URL", self.wazuh_indexer_url)
+        _require_non_empty("WAZUH_INDEXER_USER", self.wazuh_indexer_user)
+        _require_non_empty("WAZUH_INDEXER_PASSWORD", self.wazuh_indexer_password)
 
     def validate_wazuh_manager(self) -> None:
         """Validate only the Wazuh Manager settings required for agent context.
@@ -291,6 +331,26 @@ class Settings:
         _require_non_empty("SPLUNK_HEC_URL", self.splunk_hec_url)
         _require_non_empty("SPLUNK_HEC_TOKEN", self.splunk_hec_token)
 
+
+    def validate_splunk_search(self) -> None:
+        """Validate settings required to read events from Splunk.
+
+        Empty defaults rather than validation at load time keep replay mode working
+        with an empty `.env`, matching every other optional integration. This names
+        the missing key instead of letting the failure surface as a request error.
+
+        Inputs:
+            None. Uses Splunk search fields from this settings object.
+
+        Outputs:
+            None.
+
+        Raises:
+            ConfigError: If a required Splunk search setting is missing.
+        """
+
+        _require_non_empty("SPLUNK_SEARCH_URL", self.splunk_search_url)
+        _require_non_empty("SPLUNK_SEARCH_TOKEN", self.splunk_search_token)
     def validate_openbsd_pf(self) -> None:
         """Validate later-phase OpenBSD pfctl integration settings.
 
@@ -311,6 +371,27 @@ class Settings:
         _require_non_empty("OPENBSD_PF_HOST", self.openbsd_pf_host)
         _require_non_empty("OPENBSD_PF_USER", self.openbsd_pf_user)
         _require_non_empty("OPENBSD_PF_BLOCK_TABLE", self.openbsd_pf_block_table)
+
+    def response_capability_enabled(self, action: Any) -> bool:
+        """Return whether one response capability is switched on.
+
+        The response gate asks by action type, so this is the single place that
+        maps an action to its opt-in. An unknown action returns False: a
+        capability nobody has explicitly enabled must never be treated as enabled.
+
+        Inputs:
+            action: ResponseActionType, or its string value.
+
+        Outputs:
+            True only when that specific capability is enabled.
+        """
+
+        key = getattr(action, "value", action)
+        return {
+            "pf_block_ip": self.response_pf_block_enabled,
+            "wazuh_firewall_drop": self.response_wazuh_firewall_drop_enabled,
+            "wazuh_host_deny": self.response_wazuh_host_deny_enabled,
+        }.get(str(key), False)
 
     @property
     def report_model(self) -> str:
@@ -460,12 +541,25 @@ def _load_settings_from_env() -> Settings:
         splunk_hec_token=_get_str("SPLUNK_HEC_TOKEN", ""),
         splunk_hec_index=_get_str("SPLUNK_HEC_INDEX", ""),
         splunk_hec_sourcetype=_get_str("SPLUNK_HEC_SOURCETYPE", "ai_triage"),
+        splunk_search_url=_get_str("SPLUNK_SEARCH_URL", ""),
+        splunk_search_token=_get_str("SPLUNK_SEARCH_TOKEN", ""),
+        splunk_search_query=_get_str("SPLUNK_SEARCH_QUERY", ""),
+        splunk_search_earliest=_get_str("SPLUNK_SEARCH_EARLIEST", ""),
+        splunk_search_latest=_get_str("SPLUNK_SEARCH_LATEST", ""),
+        splunk_search_limit=_get_int("SPLUNK_SEARCH_LIMIT", 0),
+        splunk_search_verify_tls=_get_bool("SPLUNK_SEARCH_VERIFY_TLS", True),
         openbsd_pf_enabled=_get_bool("OPENBSD_PF_ENABLED", False),
         openbsd_pf_host=_get_str("OPENBSD_PF_HOST", ""),
         openbsd_pf_user=_get_str("OPENBSD_PF_USER", ""),
         openbsd_pflog_path=_get_path("OPENBSD_PFLOG_PATH", "/var/log/pflog"),
         openbsd_pflog_text_path=_get_str("OPENBSD_PFLOG_TEXT_PATH", ""),
         openbsd_pf_block_table=_get_str("OPENBSD_PF_BLOCK_TABLE", "ai_soc_blocklist"),
+        response_pf_block_enabled=_get_bool("RESPONSE_PF_BLOCK_ENABLED", False),
+        response_wazuh_firewall_drop_enabled=_get_bool(
+            "RESPONSE_WAZUH_FIREWALL_DROP_ENABLED", False
+        ),
+        response_wazuh_host_deny_enabled=_get_bool("RESPONSE_WAZUH_HOST_DENY_ENABLED", False),
+        playbook_dir=_get_str("PLAYBOOK_DIR", "playbooks"),
     )
 
 

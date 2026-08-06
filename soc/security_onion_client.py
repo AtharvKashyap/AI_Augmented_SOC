@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import ipaddress
 import json
 import logging
 import ssl
@@ -85,6 +86,22 @@ QUERY_PARAM = "query"
 """CONFIRMED. Name of the Elasticsearch-like query parameter."""
 
 GRID_ID_PARAM = "gridId"
+
+# Zeek `event.dataset` values. Named constants because a mistyped dataset returns
+# zero rows without erroring, which reads as "no traffic" rather than "bad query".
+ZEEK_CONN_DATASET = "conn"
+ZEEK_DNS_DATASET = "dns"
+ZEEK_HTTP_DATASET = "http"
+
+# Filter selecting Wazuh alerts mirrored into Security Onion. INFERRED: the field
+# name depends on how the deployment ships Wazuh data in, so a site using a
+# different marker corrects this one constant.
+WAZUH_MIRROR_QUERY = "event.module:wazuh"
+
+# Prefix for mirrored-event IDs. One alert read from `alerts.json` and the same
+# alert read back out of Security Onion are two *retrievals* of one event; giving
+# them identical IDs would let one overwrite the other's audit row.
+WAZUH_MIRROR_ID_PREFIX = "so-wazuh-mirror-"
 """CONFIRMED. Optional Manager-of-Managers grid selector."""
 
 DEFAULT_QUERY = '_index:"*:so-*"'
@@ -475,6 +492,158 @@ class SecurityOnionClient:
         )
         return [raw_event_from_security_onion_document(document) for document in documents]
 
+    def fetch_zeek_conn_events(
+        self,
+        *,
+        ip: str | None = None,
+        lookback_minutes: int | None = None,
+        limit: int | None = None,
+    ) -> list[RawEvent]:
+        """Fetch Zeek connection logs, optionally for one address.
+
+        Inputs:
+            ip: Optional address to match in either direction.
+            lookback_minutes: Optional window overriding config.lookback_minutes.
+            limit: Optional cap overriding config.limit.
+
+        Outputs:
+            RawEvent objects ready for SOCPipeline.run_events().
+
+        Raises:
+            ValueError: If `ip` is not a valid IP address.
+            SecurityOnionAuthError: If authentication fails.
+            SecurityOnionRequestError: If the query keeps failing.
+        """
+
+        return self._fetch_zeek_events(
+            ZEEK_CONN_DATASET, ip=ip, lookback_minutes=lookback_minutes, limit=limit
+        )
+
+    def fetch_zeek_dns_events(
+        self,
+        *,
+        ip: str | None = None,
+        lookback_minutes: int | None = None,
+        limit: int | None = None,
+    ) -> list[RawEvent]:
+        """Fetch Zeek DNS logs, optionally for one address.
+
+        Inputs:
+            ip: Optional address to match in either direction.
+            lookback_minutes: Optional window overriding config.lookback_minutes.
+            limit: Optional cap overriding config.limit.
+
+        Outputs:
+            RawEvent objects ready for SOCPipeline.run_events().
+
+        Raises:
+            ValueError: If `ip` is not a valid IP address.
+            SecurityOnionAuthError: If authentication fails.
+            SecurityOnionRequestError: If the query keeps failing.
+        """
+
+        return self._fetch_zeek_events(
+            ZEEK_DNS_DATASET, ip=ip, lookback_minutes=lookback_minutes, limit=limit
+        )
+
+    def fetch_zeek_http_events(
+        self,
+        *,
+        ip: str | None = None,
+        lookback_minutes: int | None = None,
+        limit: int | None = None,
+    ) -> list[RawEvent]:
+        """Fetch Zeek HTTP logs, optionally for one address.
+
+        Inputs:
+            ip: Optional address to match in either direction.
+            lookback_minutes: Optional window overriding config.lookback_minutes.
+            limit: Optional cap overriding config.limit.
+
+        Outputs:
+            RawEvent objects ready for SOCPipeline.run_events().
+
+        Raises:
+            ValueError: If `ip` is not a valid IP address.
+            SecurityOnionAuthError: If authentication fails.
+            SecurityOnionRequestError: If the query keeps failing.
+        """
+
+        return self._fetch_zeek_events(
+            ZEEK_HTTP_DATASET, ip=ip, lookback_minutes=lookback_minutes, limit=limit
+        )
+
+    def fetch_wazuh_mirror_events(
+        self,
+        *,
+        lookback_minutes: int | None = None,
+        min_severity: int | None = None,
+        limit: int | None = None,
+    ) -> list[RawEvent]:
+        """Fetch Wazuh alerts mirrored into Security Onion.
+
+        Tagged `EventSource.WAZUH`, not `SECURITY_ONION`: the event originated in
+        Wazuh and Security Onion was only the transport. Tagging it by transport
+        would route it to a normalizer expecting Suricata and Zeek field paths, and
+        the resulting alert would lose its rule and agent fields without anything
+        erroring.
+
+        Inputs:
+            lookback_minutes: Optional window overriding config.lookback_minutes.
+            min_severity: Optional minimum severity overriding config.min_severity.
+            limit: Optional cap overriding config.limit.
+
+        Outputs:
+            RawEvent objects tagged as Wazuh, ready for SOCPipeline.run_events().
+
+        Raises:
+            SecurityOnionAuthError: If authentication fails.
+            SecurityOnionRequestError: If the query keeps failing.
+        """
+
+        documents = self.fetch_recent_alerts(
+            query=WAZUH_MIRROR_QUERY,
+            lookback_minutes=lookback_minutes,
+            min_severity=min_severity,
+            limit=limit,
+        )
+        return [raw_event_from_wazuh_mirror_document(document) for document in documents]
+
+    def _fetch_zeek_events(
+        self,
+        dataset: str,
+        *,
+        ip: str | None,
+        lookback_minutes: int | None,
+        limit: int | None,
+    ) -> list[RawEvent]:
+        """Fetch one Zeek dataset as RawEvents.
+
+        `min_severity=0` is passed deliberately. The configured floor is tuned for
+        Suricata alerts, and Zeek logs carry no severity at all — applying the
+        floor here would return nothing while looking indistinguishable from a
+        host that simply had no traffic.
+
+        Inputs:
+            dataset: Zeek `event.dataset` value, from this module's constants.
+            ip: Optional address to match in either direction.
+            lookback_minutes: Optional window overriding config.lookback_minutes.
+            limit: Optional cap overriding config.limit.
+
+        Outputs:
+            RawEvent objects ready for SOCPipeline.run_events().
+
+        Raises:
+            ValueError: If `ip` is not a valid IP address.
+        """
+
+        return self.fetch_recent_events(
+            query=_zeek_query(dataset, ip),
+            lookback_minutes=lookback_minutes,
+            min_severity=0,
+            limit=limit,
+        )
+
     def _build_query_params(self, *, query: str, since: datetime, limit: int) -> dict[str, str]:
         """Build the /connect/query/data query parameters.
 
@@ -660,6 +829,41 @@ class SecurityOnionClient:
         time.sleep(seconds)
 
 
+def _zeek_query(dataset: str, ip: str | None) -> str:
+    """Build the query string for one Zeek dataset.
+
+    An address matches in either direction. Filtering on `source.ip` alone would
+    miss inbound traffic to a compromised host, which is the direction that
+    usually matters.
+
+    The address is validated rather than escaped. It is interpolated into a query
+    string and originates from alert data, which is attacker-controlled, so the
+    only safe contract is that it parses as an IP address before it goes anywhere
+    near the query.
+
+    Inputs:
+        dataset: Zeek `event.dataset` value.
+        ip: Optional address to filter on.
+
+    Outputs:
+        Query string for the Security Onion events endpoint.
+
+    Raises:
+        ValueError: If `ip` is set but is not a valid IP address.
+    """
+
+    query = f"event.dataset:{dataset}"
+    if ip is None:
+        return query
+
+    try:
+        address = ipaddress.ip_address(str(ip).strip())
+    except ValueError as exc:
+        raise ValueError(f"{ip!r} is not a valid IP address") from exc
+
+    return f"{query} AND (source.ip:{address} OR destination.ip:{address})"
+
+
 def extract_event_documents(response: JsonDict) -> list[JsonDict]:
     """Extract event documents from a Connect API query response.
 
@@ -727,6 +931,29 @@ def raw_event_from_security_onion_document(document: JsonDict) -> RawEvent:
     return RawEvent(
         id=_event_id_from_document(document),
         source=EventSource.SECURITY_ONION,
+        timestamp=_parse_timestamp(_document_value(document, _TIMESTAMP_PATHS)),
+        payload=dict(document),
+        received_at=utc_now(),
+    )
+
+
+def raw_event_from_wazuh_mirror_document(document: JsonDict) -> RawEvent:
+    """Convert one mirrored Wazuh document into a Wazuh-tagged RawEvent.
+
+    The ID is prefixed so it cannot collide with the same alert read directly from
+    `alerts.json`. Both are legitimate retrievals of one event, and sharing an ID
+    would let either overwrite the other's audit row.
+
+    Inputs:
+        document: Security Onion event document holding a mirrored Wazuh alert.
+
+    Outputs:
+        RawEvent with source EventSource.WAZUH.
+    """
+
+    return RawEvent(
+        id=f"{WAZUH_MIRROR_ID_PREFIX}{_event_id_from_document(document)}",
+        source=EventSource.WAZUH,
         timestamp=_parse_timestamp(_document_value(document, _TIMESTAMP_PATHS)),
         payload=dict(document),
         received_at=utc_now(),

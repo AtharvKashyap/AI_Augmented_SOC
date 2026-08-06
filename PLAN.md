@@ -63,7 +63,11 @@ The phases below are all still in scope.
 #### Milestone 1.1 — Wazuh API client
 - [x] Implement authentication against Wazuh Manager REST API (port 55000)
 - [x] Poll Wazuh agent inventory using the API to build local context (hostname, IP, OS, status)
-- [~] Pull Wazuh alert data from the configured Wazuh alert source available in the environment: Wazuh indexer/search backend, Wazuh alert JSON logs, or Wazuh data mirrored into Security Onion — **`json_logs` only.** `WazuhClient.from_settings` rejects any other `WAZUH_ALERT_SOURCE`. Indexer settings exist in `Settings` with no client behind them.
+- [x] Pull Wazuh alert data from the configured Wazuh alert source available in the environment: Wazuh indexer/search backend, Wazuh alert JSON logs, or Wazuh data mirrored into Security Onion — all three exist. `WAZUH_ALERT_SOURCE` selects `json_logs` or `indexer` (`soc/wazuh_indexer_client.py`, OpenSearch `_search` over `wazuh-alerts-*`); mirrored data is `--security-onion --wazuh-mirror`.
+  - The window and level filters are applied **twice**: once in the query and again locally, with the local pass authoritative. An index template mapping `rule.level` as a keyword would silently not honour the range filter. `min_level=0` adds no level filter at all, so "ingest everything" cannot become "ingest nothing".
+  - The hit `_id` is deliberately unused for the event ID. OpenSearch assigns it per indexed document, so a reindexed alert would arrive with a new one and be processed twice. IDs are a content fingerprint of `_source`, prefixed `wazuh-indexer-`.
+  - Verified independently, not just by the tests: the password *and* the base64 Basic blob are scrubbed from an echoed 500 body, a 401 is attempted exactly once, and one alert read via indexer / Splunk search / `alerts.json` yields three distinct IDs.
+  - **`--wazuh --daemon` with `indexer` has no read cursor** — that concept is file-offset-specific. Each cycle re-queries the whole lookback window and relies on content dedup to suppress repeats. Correct but more work per cycle than the file path.
 - [x] Support configurable minimum severity level (`WAZUH_MIN_LEVEL`)
 - [x] Parse alert fields when present: `rule.level`, `rule.description`, `rule.groups`, `agent.name`, `agent.ip`, `agent.id`, `data.*`, `full_log`
 - [x] Handle token expiry and auto-refresh — re-authenticates once on 401/403 via `request(retry_auth=True)`
@@ -85,8 +89,8 @@ Implemented in `soc/security_onion_client.py` against the **Security Onion Conne
 
 - [x] Authenticate to the Security Onion search/API endpoint — OAuth2 client credentials: `POST /oauth2/token` with HTTP Basic auth and `grant_type=client_credentials`, returning a bearer token cached until shortly before `expires_in` elapses. Create the client under Administration → API Clients with the `events/read` permission.
 - [x] Query Security Onion alert data by severity and time window — `GET /connect/query/data`. Severity is compared through `severity_from_security_onion` rather than numerically, because Suricata numbers severity *downwards*: with `SO_MIN_SEVERITY=2`, severities 1 and 2 are kept and 3+ dropped. Documents with no interpretable severity are kept rather than silently dropped.
-- [~] Query Zeek connection, DNS, and HTTP logs by source or destination IP — reachable through the same endpoint by supplying a `query`, but no dedicated Zeek helper methods yet
-- [~] Optionally query Wazuh data mirrored into Security Onion — possible via the `query` parameter; not wired as a distinct source
+- [x] Query Zeek connection, DNS, and HTTP logs by source or destination IP — `fetch_zeek_conn_events`, `fetch_zeek_dns_events`, `fetch_zeek_http_events` on `SecurityOnionClient`. An address matches source *or* destination, since inbound traffic to a compromised host is the direction that matters most. Addresses are validated as IPs before interpolation, because they originate from attacker-controlled alert data. The alert severity floor is not applied: Zeek logs carry no severity, so the floor would return nothing while looking like the host had no traffic.
+- [x] Optionally query Wazuh data mirrored into Security Onion — `fetch_wazuh_mirror_events`, selectable as `run_pipeline.py --security-onion --wazuh-mirror`. **Mirrored events are tagged `EventSource.WAZUH`, not `SECURITY_ONION`**: the event originated in Wazuh and Security Onion was only the transport, so tagging by transport would route it to a normalizer expecting Suricata/Zeek field paths and silently drop its rule and agent fields. IDs carry an `so-wazuh-mirror-` prefix so the mirrored copy cannot overwrite the `alerts.json` copy's audit row. `--wazuh-mirror` without `--security-onion` is rejected before source dispatch, since ignoring it would read the ordinary alert stream while the operator believed otherwise.
 - [x] Parse alert fields when present — handled by the existing `normalize_security_onion_event`. A test asserts the full seam: a Connect API document becomes a `RawEvent` that normalizes to an `Alert` with the expected `src_ip`, `dst_ip`, `rule_name`, `hostname`, and severity.
 - [x] Keep Security Onion access restricted to the management/SOC network — documented in `.env.example` and Security notes; `SECURITYONION_VERIFY_TLS` defaults to true
 - [x] Tolerate undocumented response shapes — one extractor handles a top-level `events` list, a nested `data.events` list, and Elasticsearch-style `hits.hits[]._source`. An unrecognized shape returns nothing and logs a warning naming the keys actually received, so a real deployment is diagnosable from logs.
@@ -113,11 +117,11 @@ Implemented in `soc/security_onion_client.py` against the **Security Onion Conne
 - [x] Support `python3 run_pipeline.py --replay tests/fixtures/sample_incident_replay.json` — the CLI is `run_pipeline.py`, not the originally planned `run_triage.py`, whose empty placeholder was deleted
 - [x] Support manual JSON event files in `tests/fixtures/manual_events/` — via `--replay-dir` / `load_replay_directory`
 - [x] Allow replay mode to pass through the same normalizer, dedup, clustering, triage, and routing code as live mode
-- [~] Add fixtures for common scenarios: benign Wazuh alert, suspicious endpoint alert, Suricata IDS alert, suspicious DNS event, and combined endpoint + network incident — four fixtures exist (`sample_wazuh_alert`, `sample_so_alert`, `sample_incident_replay`, `manual_events/sample_manual_incident`); the benign and DNS scenarios are missing, and these five are the natural seed for the labeled set in 2.5
+- [x] Add fixtures for common scenarios: benign Wazuh alert, suspicious endpoint alert, Suricata IDS alert, suspicious DNS event, and combined endpoint + network incident — all present (`sample_wazuh_alert`, `sample_wazuh_benign_alert`, `sample_so_alert`, `sample_dns_suspicious_alert`, `sample_incident_replay`, `manual_events/sample_manual_incident`)
 
 #### Milestone 1.6 — Polling daemon
 - [x] Implement main polling loop with configurable `POLL_INTERVAL_SECONDS` — `soc/daemon.py`, driven by `run_pipeline.py --daemon`, with `--poll-interval` and `--max-cycles` overrides
-- [~] Wire Wazuh client + Security Onion client + normalizer + dedup into loop — Wazuh, normalizer, dedup, and the read cursor are wired; Security Onion waits on Milestone 1.2. Replay sources also work, mainly for testing the loop.
+- [x] Wire Wazuh client + Security Onion client + normalizer + dedup into loop — all wired, including `--security-onion` in daemon mode. Replay sources also work, mainly for testing the loop.
 - [x] Structured logging (JSON lines) to `logs/` — one `cycle_completed` or `cycle_failed` record per cycle, plus start/stop records
 - [x] Graceful shutdown on SIGINT / SIGTERM — signals set a flag and the loop exits at the next safe point, never mid-cycle; the wait between cycles is sliced so shutdown does not have to sit out a long poll interval
 - [x] Survive a failing cycle — a cycle that raises is logged and the loop continues. A daemon that dies because one poll failed stops processing alerts silently, which is worse than a noisy failure.
@@ -147,7 +151,7 @@ Verified end to end against a growing `alerts.json`: cycle 1 read 2 alerts and p
 
 #### Milestone 2.0 — Alert clustering
 - [x] Implement `clustering.py` to group related alerts by host, agent, user, src IP, dst IP, and configurable time window
-- [~] Define `IncidentCandidate` dataclass with `id`, `first_seen`, `last_seen`, `primary_host`, `primary_user`, `src_ips`, `dst_ips`, `alerts`, `related_events`, `asset_context`, and `enrichment` — all present except `asset_context`, which lands with Milestone 3.1
+- [x] Define `IncidentCandidate` dataclass with `id`, `first_seen`, `last_seen`, `primary_host`, `primary_user`, `src_ips`, `dst_ips`, `alerts`, `related_events`, `asset_context`, and `enrichment` — all present; `asset_context` landed with Milestone 3.1
 - [x] Allow low-volume environments to triage single alerts when no meaningful cluster exists
 - [x] Assign local incident candidate IDs (`CAND-YYYYMMDD-NNN`) — actual format is `CAND-YYYYMMDD-NNN-<content hash>`; the hash makes reruns idempotent and is worth keeping
 - [x] Store candidate-to-alert mappings in SQLite for audit and reporting
@@ -184,7 +188,7 @@ Verified end to end against a growing `alerts.json`: cycle 1 read 2 alerts and p
 
 #### Milestone 2.4 — Analyst notification
 - [x] Implement `PAGE_NOW` path: send formatted Slack message or email with triage summary and raw alert link
-- [~] Implement `QUEUE_REVIEW` path: append to analyst review queue (SQLite table) — a `routing_decisions` row is written, but there is no queue table, no work-list, and no way to mark an item handled. Nothing can currently be *reviewed*.
+- [x] Implement `QUEUE_REVIEW` path: append to analyst review queue (SQLite table) — the `analyst_queue` table holds the work-list and `run_review.py` lists, shows, and closes items with an analyst name and verdict.
 - [x] Implement `MARK_LIKELY_BENIGN` path: log, mark likely benign, and keep searchable
 
 #### Milestone 2.4a — Make the review queue real *(new)*
@@ -205,7 +209,7 @@ The gap that mattered most: nothing distinguished good triage from bad, so no pr
 - [x] Local half runs in CI on every push via `run_eval.py --fail-under-thresholds`; the LLM half is opt-in through `--llm` so CI needs no API key. In LLM mode fallback is **disabled**, so a failed model call is a visible error rather than a local score quietly standing in for one and skewing the measurement.
 - [x] Exit criteria are executable: `EvaluationThresholds` encodes them and `check()` returns one message per unmet criterion, so a build can be gated on triage quality.
 - [x] Label provenance is tracked and surfaced. `is_analyst_validated` is false for any run containing a synthetic label, and the CLI prints the caveat to stderr on every such run, so a self-consistency run can never be quietly reported as an accuracy result.
-- [ ] Record prompt version and model on every eval run so results are comparable over time — the triage result carries both; the eval summary does not yet copy them through
+- [x] Record prompt version and model on every eval run so results are comparable over time — the summary carries `prompt_versions` and `models` as *counts*, plus per-case attribution. Counts rather than one value per run, because rate limits push individual cases into local fallback: reporting a single model name would hide that some scores never came from it. A locally scored case is labeled `local`, not left null.
 
 **First run found two real defects** in local scoring, which is the harness earning its place:
 
@@ -320,7 +324,7 @@ Deterministic Markdown reporting already works and is tested — `MarkdownReport
 #### Milestone 4.4 — Report delivery
 - [x] Implement `run_report.py` with `list`, `show` and `generate` subcommands; `generate` takes `--output`, `--notes`/`--notes-file`, `--no-llm` and `--email`
 - [x] Email delivery of the Markdown report as a `text/markdown` attachment, with the summary still in the body so a client that cannot render the attachment is not left with nothing
-- [ ] Later phase: post report summary to Splunk via HEC webhook (Milestone 5.1)
+- [x] Post report summary to Splunk via HEC — `run_report.py generate --splunk`. Only the incident summary is sent; the report body stays local, since it is already written to disk and emailable and a Splunk index is the wrong place to accumulate narrative documents. A push failure is recorded, not raised: the report file already exists by then, so failing would report it as unproduced.
 
 **Exit criteria:** Analyst can run `python3 run_report.py generate <incident-id>` and receive a drafted Markdown incident report, optionally by email. Every report states whether it was LLM-drafted or templated. The same reporting logic summarizes replay-generated incidents for testing, and report generation still succeeds with no API key configured.
 
@@ -343,22 +347,22 @@ Both integrations are optional: with Splunk and pflog unconfigured the pipeline 
 - [x] Only derived fields are sent, never raw source events or enrichment `raw`. A Splunk index should not become a second copy of raw telemetry.
 - [x] The HEC token is scrubbed from every exception and log line, since HEC error bodies get quoted into messages. Verified by planting the token in a 500 response body.
 - [x] Sending is opt-in, and requesting it unconfigured fails loudly. A push that fails at runtime is recorded but does not fail the run, because results are already persisted locally.
-- [ ] `--splunk` with `--daemon` is refused rather than silently sending nothing each cycle. Per-cycle pushing is a real feature and is not built.
+- [x] `--splunk` with `--daemon` now pushes every cycle. A failed push is logged and recorded in `summary["errors"]` without stopping the loop; the client is built once per run, not per cycle.
 
-#### Milestone 5.2 — Splunk input option — **not built, pending a decision**
-Deliberately left out rather than quietly skipped. Building it means maintaining two ingestion architectures — direct Wazuh/Security Onion readers *and* a Splunk search client — to serve a capability the project does not currently need, and this milestone itself commits to keeping direct ingestion either way. Every ingestion bug would then need reproducing twice.
-- [ ] Add optional Splunk search client as a later ingestion source
-- [ ] Allow Splunk to become a unified read layer after forwarding is configured
-- [ ] Keep direct Wazuh and Security Onion ingestion available even after Splunk is added
+#### Milestone 5.2 — Splunk input option
+Built on request after being initially recommended for cutting. The cost stands as recorded: two ingestion architectures mean every ingestion bug can need reproducing twice. Direct ingestion remains the default and is pinned by a test asserting `--wazuh` never consults the search client.
+- [x] Add optional Splunk search client as a later ingestion source — `soc/splunk_search_client.py`, selectable as `run_pipeline.py --splunk-search`. Creates a search job, polls it under a bounded attempt count with an injected sleep, and reads the results. An unrecognized job-completion rendering reads as *not finished*, so a Splunk version mismatch trips the poll bound and reports itself rather than silently returning a partial job. 401/403 is not retried; 5xx is.
+- [x] Allow Splunk to become a unified read layer after forwarding is configured — a row's `sourcetype`/`source`/`index` can reclassify it as Wazuh or Security Onion so it normalizes with the right field paths. Detection is deliberately conservative: anything ambiguous stays `EventSource.SPLUNK` and normalizes generically, because guessing wrong hands a payload to a normalizer expecting different fields. **Event IDs are prefixed `splunk-search-`**, so one alert read through Splunk and the same alert read from `alerts.json` cannot overwrite each other's audit row.
+- [x] Keep direct Wazuh and Security Onion ingestion available even after Splunk is added — unchanged, and pinned by a test.
 
-Recommend cutting unless someone specifically wants Splunk as the read layer. Reopen if so.
+**Not verified against a live Splunk instance.** Every response-shape field name is inferred and isolated in named constants; the request paths, parameters, and bearer auth are from the documented REST API.
 
 #### Milestone 5.3 — OpenBSD `pflog` visibility
 - [x] Ingest parsed `pflog` events — `soc/pflog.py`, via `run_pipeline.py --pflog`. Unparseable lines are skipped, counted and logged rather than fatal, matching the `alerts.json` reader.
 - [x] Normalize into the common `Alert` schema — `normalize_openbsd_pf_event`. **A `block` maps to `LOW` and a `pass` to `INFO`; nothing in this path can return `HIGH`.** A firewall block is the firewall working as configured, and a busy firewall mapped to high severity would bury real detections. This is the same failure mode as the `private_ip` scoring defect the eval harness caught in Phase 3.
 - [x] Correlate firewall blocks with Wazuh and Security Onion alerts — **this needed no new code**: entity-based clustering already merges a pf event with an endpoint alert sharing an address. Verified, and pinned with a test, because emergent behavior with no test regresses silently.
 - [x] Include firewall evidence in triage context — pf alerts join the candidate's alert list and reach the model through the existing allowlist.
-- [ ] `OPENBSD_PFLOG_TEXT_PATH` is a **separate setting** from `OPENBSD_PFLOG_PATH`. The latter is `/var/log/pflog`, a pcap file the parser cannot read; ingestion reads `tcpdump -n -e -ttt -r` text output. Conflating them would have an operator point the reader at binary data and get a silent zero-result run.
+- [x] `OPENBSD_PFLOG_TEXT_PATH` is a **separate setting** from `OPENBSD_PFLOG_PATH`. The latter is `/var/log/pflog`, a pcap file the parser cannot read; ingestion reads `tcpdump -n -e -ttt -r` text output. Conflating them would have an operator point the reader at binary data and get a silent zero-result run.
 
 **The pflog line format is inferred, not verified.** No OpenBSD host was available to check real `tcpdump` output against, so the regex lives in a single `PFLOG_LINE_PATTERN` constant marked as inferred, the same approach as the undocumented Security Onion query parameters. A real deployment corrects that constant and the timestamp formats, nothing else.
 
@@ -373,34 +377,66 @@ Not verified: no event has reached a live Splunk instance, and no real `tcpdump`
 ### Phase 6 — Controlled response and analyst assistant interface
 **Goal:** Add human-approved response actions and give analysts a conversational interface to query SOC data, ask about alerts, and get AI-assisted investigation support.
 
-Not started, and correctly last. Note that the essential fragment of this phase — capturing analyst verdicts — has been pulled forward to Milestone 2.4a, because it is the only feedback signal the system will get and Phase 2 needs it. Nothing here should begin before Phase 2's exit criteria are met: response actions driven by unmeasured scores are the worst possible ordering.
+Implemented. The essential fragment — capturing analyst verdicts — was pulled forward to Milestone 2.4a, because it is the only feedback signal the system gets and Phase 2 needed it.
+
+**The ordering concern was raised twice and overruled, so the phase was built with the concern encoded in the code rather than left as advice.** Response actions driven by unmeasured scores are still the wrong thing; what makes this safe to have built is that `soc/response.py` refuses to act on a score no model produced. With no model configured, no response can fire at all. The safety property does not depend on anyone remembering the argument.
+
+`soc/response.py` is a module whose job is to refuse. Six independent gates, each of which must pass:
+
+1. **The capability is explicitly enabled**, one switch per capability, all defaulting off. Blocking an external address and dropping an endpoint off the network are different risks, so enabling one never implies another.
+2. **The score came from a model.** Not configurable. A regex heuristic must not be able to take a host off the network.
+3. **A playbook applies** to the action, and the score meets the confidence it demands.
+4. **The target is valid.** A firewall block refuses anything not publicly routable, including `0.0.0.0`; blocking internal or reserved space could cut off the network the firewall protects.
+5. **A named analyst approved**, and approval cannot resurrect a proposal an earlier gate denied.
+6. **The action was auditable before it happened.** If the audit write fails, execution does not occur: an unlogged firewall change cannot be reviewed or rolled back.
+
+Execution is a dry run unless explicitly told otherwise, and every executed action records both the command and the command that undoes it.
 
 #### Milestone 6.0 — Controlled response framework
-- [ ] Define playbook schema: `trigger_conditions`, `required_confidence`, `action`, `requires_confirmation`
-- [ ] Implement `playbooks/` directory with YAML playbook definitions
-- [ ] Load and validate playbooks at startup
-- [ ] Require explicit `.env` opt-in for every response capability
-- [ ] Log every suggested, approved, denied, and executed response action
+- [x] Playbook schema — `soc/playbooks.py`: `action`, `required_confidence`, `requires_confirmation`, `enabled`, `trigger_actions`, plus a **required** description, because an unexplained response playbook cannot be reviewed by anyone.
+- [x] `playbooks/` directory with definitions — **JSON, not YAML.** Deliberate deviation: the project is stdlib-only and a YAML parser is not worth a dependency for three small files. Replay files and labeled sets are already JSON.
+- [x] Load and validate playbooks, rejecting unknown actions and duplicate names. Omitting `requires_confirmation` means **true**: silence must never mean unattended execution.
+- [x] Explicit opt-in per capability via `RESPONSE_PF_BLOCK_ENABLED`, `RESPONSE_WAZUH_FIREWALL_DROP_ENABLED`, `RESPONSE_WAZUH_HOST_DENY_ENABLED`, all defaulting false, resolved through `Settings.response_capability_enabled`. An unknown action returns false.
+- [x] Every stage is audited to `response_actions`, keyed on a deterministic proposal ID so the suggested, approved and executed stages of one decision update a single row instead of forking the trail. **Refusals are recorded too**: why nothing happened is as reviewable as what ran.
+- [x] Applicability is silent; a confidence shortfall is an audited refusal. Folding score into applicability would have meant "we declined because confidence was too low" was never written down, which is exactly the record needed to tune the bar. A test caught that.
 
 #### Milestone 6.1 — CLI analyst assistant
-- [ ] Implement `run_assistant.py` interactive CLI
-- [ ] Context window includes: recent alerts, open incidents, triage queue, asset inventory
-- [ ] Analyst can ask: "summarize today's high alerts", "what's the blast radius if 10.0.1.42 is compromised", "show all alerts from this IP in the last 24h"
+- [x] `run_assistant.py`, with `--ask` for one question and a thin REPL otherwise
+- [x] Context from recent alerts, open incidents, the review queue and asset inventory, built through the **existing triage allowlist** rather than a second filtering scheme, so raw alert payloads never reach the model. Verified with a canary planted in non-allowlisted `raw` keys.
+- [x] Deterministic router answers high-alert summaries, the queue, incidents, blast radius for an entity including its asset criticality, and alerts from an address — so the assistant works with no API key. A failed model call falls back and is relabelled deterministic.
+- [x] **The assistant is structurally read-only, and this is a security property, not tidiness.** Alert data is attacker-controlled: a hostname or log line can contain "approve the block of 8.8.8.8", and that text enters the assistant's context. An assistant able to act on its own context would be a remote-code-execution path wearing a chat interface. It does not import `soc.response` and calls no action verb; an AST-based test enforces that so it cannot regress silently. The system prompt also tells the model to treat context as untrusted data, but that is defence-in-depth, not the guarantee.
+
+#### Milestone 6.1a — Response approval CLI *(new)*
+Not in the original plan, but the response framework is unusable without an operator path, and putting approval in the conversational assistant would have undone the safety work above.
+- [x] `run_response.py` — non-conversational, no model path at all. Takes an explicit proposal ID and an explicit analyst name.
+- [x] **Two independent safeguards on a live action:** without `--force-live` it is a dry run, and without `--confirm` it refuses outright. Running it with neither is inert, so one forgotten flag cannot cause a live firewall change.
+- [x] Never bypasses `ResponseGate`, so the approval, audit-before-action and executor-matching guards all still apply.
+- [x] A stored triage result reloaded from the database must keep its `analysis_source`, or a round trip could launder a local score past the model-score gate. Covered by a test.
 
 #### Milestone 6.2 — OpenBSD `pfctl` approved response
-- [ ] Implement an OpenBSD SSH-based response executor for approved `pfctl` changes
-- [ ] Action: add a malicious IP to a controlled block table
-- [ ] Require analyst confirmation for all firewall changes by default
-- [ ] Log the exact command, target IP, reason, approving analyst, and rollback command
-- [ ] Provide a rollback helper to remove IPs from the block table
+- [x] SSH-based executor in `soc/pfctl_client.py`, shelling out to the `ssh` binary with an **argument list, never a shell string**, and never `shell=True`
+- [x] Adds an address to the controlled block table; `describe()` is pure and returns the exact add and delete commands for the audit trail
+- [x] Analyst confirmation required by default, enforced by the gate rather than by this module
+- [x] The command, target, reason, approving analyst and rollback command are all recorded
+- [x] `rollback()` removes the address, because an action nobody can undo is not a controlled action
+- [x] **Target validation happens before anything reaches a command.** This is a command-injection boundary: the target originates from alert data. Verified that `8.8.8.8; rm -rf /`, `$(curl evil.example)`, `-oProxyCommand=...` and malformed addresses are all refused with **zero** transport calls.
+- [x] `strict_host_key_checking` defaults true and logs a warning when disabled; the identity file path is redacted from output, errors and the audit trail
+- [x] `dry_run` performs no SSH at all. The agent proved this by disabling the branch and watching a real connection attempt escape.
 
 #### Milestone 6.3 — Wazuh active response
-- [ ] Implement Wazuh active response integration where supported
-- [ ] Action: trigger configured endpoint response such as `firewall-drop` or `host-deny` on a specific agent
-- [ ] Require `score >= 9` and analyst confirmation for endpoint-impacting actions
-- [ ] Require the score to come from a model result, not a local fallback — a regex heuristic must never be able to trigger an endpoint action
+- [x] Wazuh active response via `PUT /active-response` in `soc/wazuh_response.py`
+- [x] `firewall-drop` and `host-deny` executors, scoped to a specific agent, with the agent ID validated before use
+- [x] `score >= 9` comes from the shipped playbooks, and analyst confirmation from the gate
+- [x] **A locally-scored result can never trigger an endpoint action.** Enforced in `soc/response.py`, not configurable, and re-checked after a database round trip.
+- [x] Endpoint responses have **no rollback through this API**, so `describe()` returns text that says so rather than inventing a command that would not work. A rollback field that lies is worse than one admitting the limitation.
+
+**Parts of the Wazuh request shape are inferred**, not verified against a live Manager: the command names including the trailing `0`, the body field names, and whether agent scope travels in the body or as a query parameter. All are isolated in module constants marked `NOT FULLY VERIFIED`, the same approach as the undocumented Security Onion query parameters.
 
 **Exit criteria:** Analysts can query recent alerts/incidents from a CLI assistant. Any firewall or endpoint response requires explicit opt-in, analyst approval, audit logging, and rollback where possible. No response path can be triggered by a locally-scored result, and the labeled-set metrics from 2.5 are recorded at the time any response capability is enabled.
+
+**Status: the mechanisms are met; the last clause is not, and cannot be by code.** Opt-in, approval, audit and rollback-where-possible are all implemented and tested, and no response path can be triggered by a locally-scored result. But recording labeled-set metrics at the time a capability is enabled requires a labeled set larger than five synthetic cases and a real model run. **Do not enable a response capability until that exists.** The code will refuse anyway while no model is configured, but that is a backstop, not a substitute for having measured the scores you are about to act on.
+
+Nothing here has been executed against a real firewall, a real OpenBSD host, or a real Wazuh Manager. Every executor is tested against an injected runner or a faked transport.
 
 ---
 

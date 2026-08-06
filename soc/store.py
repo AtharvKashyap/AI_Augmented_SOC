@@ -540,6 +540,90 @@ class SQLiteStore:
                 ),
             )
 
+    def record_response_action(self, proposal: Any) -> None:
+        """Record one response proposal at its current lifecycle stage.
+
+        Keyed on the proposal's deterministic ID, so the suggested, approved and
+        executed stages of one decision update a single row rather than forking
+        the audit trail. Refusals are recorded too: why nothing happened is as
+        reviewable a question as what ran.
+
+        `soc.response.ResponseGate` calls this *before* performing an action and
+        treats a failure here as a reason not to act, so this must raise rather
+        than swallow.
+
+        Inputs:
+            proposal: ResponseProposal exposing to_dict().
+
+        Outputs:
+            None. The action is inserted or updated.
+        """
+
+        payload = proposal.to_dict()
+        now = utc_now()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO response_actions (
+                    id, playbook_name, action, target, triage_result_id,
+                    triage_score, analysis_source, status, approved_by, command,
+                    rollback_command, dry_run, payload_json, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    status = excluded.status,
+                    approved_by = excluded.approved_by,
+                    command = excluded.command,
+                    rollback_command = excluded.rollback_command,
+                    dry_run = excluded.dry_run,
+                    payload_json = excluded.payload_json,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    proposal.id,
+                    proposal.playbook_name,
+                    proposal.action.value,
+                    proposal.target,
+                    proposal.triage_result_id,
+                    int(proposal.triage_score),
+                    proposal.analysis_source.value,
+                    proposal.status.value,
+                    proposal.approved_by,
+                    proposal.command,
+                    proposal.rollback_command,
+                    1 if proposal.dry_run else 0,
+                    _to_json(payload),
+                    _dt_to_text(proposal.created_at),
+                    _dt_to_text(now),
+                ),
+            )
+
+    def list_response_actions(self, limit: int | None = None) -> list[JsonDict]:
+        """Return recorded response actions, most recently updated first.
+
+        Inputs:
+            limit: Optional maximum number of actions.
+
+        Outputs:
+            List of response action dictionaries.
+        """
+
+        sql = "SELECT payload_json FROM response_actions ORDER BY updated_at DESC, id DESC"
+        params: tuple[Any, ...] = ()
+        if limit is not None:
+            sql += " LIMIT ?"
+            params = (limit,)
+
+        with self._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+
+        actions: list[JsonDict] = []
+        for row in rows:
+            payload = json.loads(row["payload_json"])
+            if isinstance(payload, dict):
+                actions.append(payload)
+        return actions
+
     def save_incident(self, incident: Any) -> None:
         """Persist one incident and its candidate mapping.
 
@@ -1322,6 +1406,27 @@ CREATE TABLE IF NOT EXISTS dedup_keys (
 
 CREATE INDEX IF NOT EXISTS idx_dedup_keys_expires_at
     ON dedup_keys(expires_at);
+
+CREATE TABLE IF NOT EXISTS response_actions (
+    id TEXT PRIMARY KEY,
+    playbook_name TEXT NOT NULL,
+    action TEXT NOT NULL,
+    target TEXT NOT NULL,
+    triage_result_id TEXT,
+    triage_score INTEGER,
+    analysis_source TEXT,
+    status TEXT NOT NULL,
+    approved_by TEXT,
+    command TEXT,
+    rollback_command TEXT,
+    dry_run INTEGER NOT NULL,
+    payload_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_response_actions_status
+    ON response_actions(status, updated_at);
 
 CREATE TABLE IF NOT EXISTS incidents (
     id TEXT PRIMARY KEY,

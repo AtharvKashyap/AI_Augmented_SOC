@@ -216,13 +216,13 @@ def test_validate_wazuh_manager_accepts_only_manager_settings(tmp_path):
     settings.validate_wazuh_manager()
 
 
-def test_validate_wazuh_accepts_rejects_unsupported_alert_source(tmp_path):
-    """Full Wazuh validation should reject unsupported alert sources."""
+def test_validate_wazuh_rejects_an_unsupported_alert_source(tmp_path):
+    """Full Wazuh validation should reject alert sources with no reader behind them."""
 
     env_file = _write_env_file(
         tmp_path,
         """
-        WAZUH_ALERT_SOURCE=indexer
+        WAZUH_ALERT_SOURCE=carrier_pigeon
         WAZUH_ALERT_JSON_PATH=data/alerts.json
         """,
     )
@@ -231,6 +231,45 @@ def test_validate_wazuh_accepts_rejects_unsupported_alert_source(tmp_path):
 
     with pytest.raises(ConfigError, match="Unsupported Wazuh alert source"):
         settings.validate_wazuh()
+
+
+def test_validate_wazuh_dispatches_to_the_indexer_validator(tmp_path):
+    """`indexer` is a supported source now, so validation must check its settings.
+
+    Left rejecting `indexer`, this method would report a working configuration as
+    unsupported — and the ingestion path does not call it, so the staleness would
+    stay invisible until someone wired validation in and it failed for no reason.
+    """
+
+    env_file = _write_env_file(
+        tmp_path,
+        """
+        WAZUH_ALERT_SOURCE=indexer
+        """,
+    )
+
+    settings = get_settings(env_file, reload=True)
+
+    with pytest.raises(ConfigError, match="WAZUH_INDEXER_URL"):
+        settings.validate_wazuh()
+
+
+def test_validate_wazuh_accepts_a_configured_indexer(tmp_path):
+    """A fully configured indexer must pass full Wazuh validation."""
+
+    env_file = _write_env_file(
+        tmp_path,
+        """
+        WAZUH_ALERT_SOURCE=indexer
+        WAZUH_INDEXER_URL=https://indexer.example:9200
+        WAZUH_INDEXER_USER=soc-reader
+        WAZUH_INDEXER_PASSWORD=not-a-real-password
+        """,
+    )
+
+    settings = get_settings(env_file, reload=True)
+
+    settings.validate_wazuh()
 
 
 def test_validate_wazuh_json_logs_accepts_alert_json_path(tmp_path):
@@ -437,3 +476,127 @@ def test_pflog_text_path_defaults_to_empty(tmp_path):
     env_file = _write_env_file(tmp_path, "OUTPUT_DIR=output")
 
     assert get_settings(env_file, reload=True).openbsd_pflog_text_path == ""
+
+
+def test_response_capabilities_are_all_disabled_by_default(tmp_path):
+    """Every response capability is off unless explicitly switched on.
+
+    A default-on response capability means a misconfigured deploy could change a
+    firewall or drop a host by itself.
+
+    Inputs:
+        tmp_path: Pytest temporary directory fixture.
+
+    Outputs:
+        None. Assertions verify each capability defaults to False.
+    """
+
+    settings = get_settings(_write_env_file(tmp_path, "OUTPUT_DIR=output"), reload=True)
+
+    assert settings.response_pf_block_enabled is False
+    assert settings.response_wazuh_firewall_drop_enabled is False
+    assert settings.response_wazuh_host_deny_enabled is False
+
+
+def test_each_response_capability_has_its_own_switch(tmp_path):
+    """Enabling one capability must never imply another.
+
+    Blocking an external address at the firewall and dropping an endpoint off the
+    network are different risks and need separate decisions.
+
+    Inputs:
+        tmp_path: Pytest temporary directory fixture.
+
+    Outputs:
+        None. Assertions verify the switches are independent.
+    """
+
+    settings = get_settings(
+        _write_env_file(tmp_path, "RESPONSE_PF_BLOCK_ENABLED=true"), reload=True
+    )
+
+    assert settings.response_pf_block_enabled is True
+    assert settings.response_wazuh_firewall_drop_enabled is False
+    assert settings.response_wazuh_host_deny_enabled is False
+
+
+def test_response_capability_lookup_matches_action_names(tmp_path):
+    """The gate asks by action type, so the mapping must cover every action.
+
+    Inputs:
+        tmp_path: Pytest temporary directory fixture.
+
+    Outputs:
+        None. Assertions verify lookup by action value.
+    """
+
+    from soc.response import ResponseActionType
+
+    settings = get_settings(
+        _write_env_file(tmp_path, "RESPONSE_WAZUH_HOST_DENY_ENABLED=true"), reload=True
+    )
+
+    assert settings.response_capability_enabled(ResponseActionType.WAZUH_HOST_DENY) is True
+    assert settings.response_capability_enabled(ResponseActionType.PF_BLOCK_IP) is False
+
+
+def test_playbook_directory_setting_defaults_to_playbooks(tmp_path):
+    """Playbooks live in a known place but must remain overridable.
+
+    Inputs:
+        tmp_path: Pytest temporary directory fixture.
+
+    Outputs:
+        None. Assertion verifies the default.
+    """
+
+    settings = get_settings(_write_env_file(tmp_path, "OUTPUT_DIR=output"), reload=True)
+
+    assert settings.playbook_dir == "playbooks"
+
+
+def test_splunk_search_settings_are_read_from_the_environment(tmp_path):
+    """Milestone 5.2 ingestion needs its keys in Settings, not just via getattr.
+
+    `SplunkSearchClient.from_settings` reads with `getattr` defaults, so absent
+    keys do not crash — they make a configured `--splunk-search` run fail as
+    though nothing had been set.
+    """
+
+    env_file = _write_env_file(
+        tmp_path,
+        """
+        SPLUNK_SEARCH_URL=https://splunk.example:8089
+        SPLUNK_SEARCH_TOKEN=not-a-real-token
+        SPLUNK_SEARCH_QUERY=search index=soc sourcetype=wazuh
+        SPLUNK_SEARCH_EARLIEST=-30m
+        SPLUNK_SEARCH_LATEST=now
+        SPLUNK_SEARCH_LIMIT=250
+        """,
+    )
+
+    settings = get_settings(env_file, reload=True)
+
+    assert settings.splunk_search_url == "https://splunk.example:8089"
+    assert settings.splunk_search_token == "not-a-real-token"
+    assert settings.splunk_search_query == "search index=soc sourcetype=wazuh"
+    assert settings.splunk_search_earliest == "-30m"
+    assert settings.splunk_search_latest == "now"
+    assert settings.splunk_search_limit == 250
+
+
+def test_splunk_search_tls_verification_defaults_to_on(tmp_path):
+    """A read layer holding SOC data must not default to unverified TLS."""
+
+    settings = get_settings(_write_env_file(tmp_path, ""), reload=True)
+
+    assert settings.splunk_search_verify_tls is True
+
+
+def test_validate_splunk_search_requires_a_url_and_token(tmp_path):
+    """Validation must name the missing key rather than failing at request time."""
+
+    settings = get_settings(_write_env_file(tmp_path, ""), reload=True)
+
+    with pytest.raises(ConfigError, match="SPLUNK_SEARCH_URL"):
+        settings.validate_splunk_search()

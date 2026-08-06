@@ -906,3 +906,69 @@ def test_list_recent_incidents_honours_a_limit(store):
         store.save_incident(_incident(f"INC-20260805-00{index}-aaa"))
 
     assert len(store.list_recent_incidents(limit=2)) == 2
+
+
+def _proposal(status: str = "executed", proposal_id: str = "RESP-abc123"):
+    """Build a response proposal for audit tests."""
+
+    from soc.models import AnalysisSource
+    from soc.response import ResponseActionType, ResponseProposal, ResponseStatus
+
+    return ResponseProposal(
+        id=proposal_id,
+        playbook_name="pf-block-malicious-ip",
+        action=ResponseActionType.PF_BLOCK_IP,
+        target="8.8.8.8",
+        triage_result_id="triage-1",
+        triage_score=9,
+        analysis_source=AnalysisSource.LLM,
+        status=ResponseStatus(status),
+        reason="score 9 met required confidence 9",
+        approved_by="alice",
+        command="pfctl -t blocklist -T add 8.8.8.8",
+        rollback_command="pfctl -t blocklist -T delete 8.8.8.8",
+        dry_run=False,
+    )
+
+
+def test_response_actions_are_auditable(store):
+    """A firewall change nobody can review is not a controlled action."""
+
+    store.record_response_action(_proposal())
+    actions = store.list_response_actions()
+
+    assert len(actions) == 1
+    assert actions[0]["target"] == "8.8.8.8"
+    assert actions[0]["approved_by"] == "alice"
+    assert actions[0]["rollback_command"] == "pfctl -t blocklist -T delete 8.8.8.8"
+
+
+def test_recording_the_same_proposal_twice_updates_one_row(store):
+    """A proposal moves through statuses; each stage must not fork the trail."""
+
+    from soc.response import ResponseStatus
+
+    store.record_response_action(_proposal(status="suggested"))
+    store.record_response_action(_proposal(status="approved"))
+    store.record_response_action(_proposal(status="executed"))
+
+    actions = store.list_response_actions()
+    assert len(actions) == 1
+    assert actions[0]["status"] == ResponseStatus.EXECUTED.value
+
+
+def test_denied_response_actions_are_recorded_too(store):
+    """Why nothing happened is as reviewable as what ran."""
+
+    store.record_response_action(_proposal(status="denied", proposal_id="RESP-denied1"))
+
+    assert store.list_response_actions()[0]["status"] == "denied"
+
+
+def test_list_response_actions_honours_a_limit(store):
+    """A long audit trail must be pageable."""
+
+    for index in range(4):
+        store.record_response_action(_proposal(proposal_id=f"RESP-{index}"))
+
+    assert len(store.list_response_actions(limit=2)) == 2
