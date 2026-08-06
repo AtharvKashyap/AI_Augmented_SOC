@@ -17,6 +17,8 @@ import pytest
 
 from soc.evaluation import (
     LABELED_SET_DIR,
+    LOCAL_SCORING_LABEL,
+    CaseScore,
     EvaluationError,
     EvaluationThresholds,
     LabeledCase,
@@ -524,3 +526,113 @@ def test_promotion_skips_targets_with_no_recoverable_events(tmp_path):
     )
 
     assert records == []
+
+
+def test_the_summary_records_the_prompt_version_that_produced_the_scores():
+    """Milestone 2.5 requires results be comparable across prompt revisions.
+
+    Without the prompt version in the summary, two eval runs are two numbers with
+    no way to tell whether a change in agreement came from the prompt or the
+    labels.
+    """
+
+    report = evaluate_cases(
+        [_case()],
+        score_action_source=lambda case: CaseScore(
+            score=2,
+            action=TriageAction.MARK_LIKELY_BENIGN,
+            prompt_version="triage-v1",
+            model="anthropic/claude-x",
+        ),
+    )
+
+    assert report.to_summary()["prompt_versions"] == {"triage-v1": 1}
+
+
+def test_the_summary_records_the_model_that_produced_the_scores():
+    """A score is only comparable against another score from the same model."""
+
+    report = evaluate_cases(
+        [_case()],
+        score_action_source=lambda case: CaseScore(
+            score=2,
+            action=TriageAction.MARK_LIKELY_BENIGN,
+            prompt_version="triage-v1",
+            model="anthropic/claude-x",
+        ),
+    )
+
+    assert report.to_summary()["models"] == {"anthropic/claude-x": 1}
+
+
+def test_a_run_that_mixed_model_and_local_scoring_reports_both():
+    """Counts, not a single value: a run degrades per case, not all at once.
+
+    Rate limits push individual cases into local fallback. Reporting one model
+    name for the run would hide that some scores never came from it — the same
+    provenance-laundering the `analysis_source` field exists to prevent.
+    """
+
+    scores = iter(
+        [
+            CaseScore(2, TriageAction.MARK_LIKELY_BENIGN, "triage-v1", "anthropic/claude-x"),
+            CaseScore(2, TriageAction.MARK_LIKELY_BENIGN, None, None),
+        ]
+    )
+    report = evaluate_cases(
+        [_case("case-001"), _case("case-002")],
+        score_action_source=lambda case: next(scores),
+    )
+
+    summary = report.to_summary()
+
+    assert summary["models"] == {"anthropic/claude-x": 1, LOCAL_SCORING_LABEL: 1}
+    assert summary["prompt_versions"] == {"triage-v1": 1, LOCAL_SCORING_LABEL: 1}
+
+
+def test_a_locally_scored_run_is_labeled_local_not_blank():
+    """An empty string or null in a comparison key reads as missing data.
+
+    A local run is a legitimate, reproducible configuration. It should say so.
+    """
+
+    report = evaluate_cases(
+        [_case()],
+        score_action_source=lambda case: CaseScore(2, TriageAction.MARK_LIKELY_BENIGN, None, None),
+    )
+
+    assert report.to_summary()["models"] == {LOCAL_SCORING_LABEL: 1}
+
+
+def test_each_case_in_the_summary_carries_the_model_that_scored_it():
+    """Per-case attribution is what makes a disagreement investigable."""
+
+    report = evaluate_cases(
+        [_case()],
+        score_action_source=lambda case: CaseScore(
+            score=2,
+            action=TriageAction.MARK_LIKELY_BENIGN,
+            prompt_version="triage-v1",
+            model="anthropic/claude-x",
+        ),
+    )
+
+    case_summary = report.to_summary()["cases"][0]
+
+    assert case_summary["model"] == "anthropic/claude-x"
+    assert case_summary["prompt_version"] == "triage-v1"
+
+
+def test_a_scorer_returning_a_plain_pair_still_works():
+    """The (score, action) seam predates this field and must keep working.
+
+    Tests of the metric arithmetic have no model to report, and forcing them to
+    construct provenance they do not have would make those tests lie.
+    """
+
+    report = evaluate_cases(
+        [_case()],
+        score_action_source=lambda case: (2, TriageAction.MARK_LIKELY_BENIGN),
+    )
+
+    assert report.to_summary()["models"] == {LOCAL_SCORING_LABEL: 1}

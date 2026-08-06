@@ -30,6 +30,8 @@ from typing import Any, Final
 
 from dotenv import load_dotenv
 
+from soc.wazuh_indexer_client import INDEXER_ALERT_SOURCE
+
 DEFAULT_ENV_FILE: Final[Path] = Path(".env")
 
 
@@ -57,7 +59,7 @@ class Settings:
     wazuh_manager_user: str
     wazuh_manager_password: str
     wazuh_manager_verify_tls: bool
-    # Deprecated/optional Indexer fields kept for backward-compatible loading.
+    # Wazuh Indexer (OpenSearch) fields, used when WAZUH_ALERT_SOURCE=indexer.
     wazuh_indexer_url: str
     wazuh_indexer_user: str
     wazuh_indexer_password: str
@@ -128,6 +130,13 @@ class Settings:
     splunk_hec_token: str
     splunk_hec_index: str
     splunk_hec_sourcetype: str
+    splunk_search_url: str
+    splunk_search_token: str
+    splunk_search_query: str
+    splunk_search_earliest: str
+    splunk_search_latest: str
+    splunk_search_limit: int
+    splunk_search_verify_tls: bool
 
     # Later phase: OpenBSD firewall integration
     openbsd_pf_enabled: bool
@@ -181,10 +190,13 @@ class Settings:
         if self.wazuh_alert_source == "json_logs":
             self.validate_wazuh_json_logs()
             return
+        if self.wazuh_alert_source == INDEXER_ALERT_SOURCE:
+            self.validate_wazuh_indexer()
+            return
 
         raise ConfigError(
             "Unsupported Wazuh alert source: "
-            f"{self.wazuh_alert_source}. Supported value: json_logs"
+            f"{self.wazuh_alert_source}. Supported values: json_logs, {INDEXER_ALERT_SOURCE}"
         )
 
     def validate_wazuh_json_logs(self) -> None:
@@ -203,6 +215,27 @@ class Settings:
         if self.wazuh_alert_json_path == Path(""):
             raise ConfigError("Missing required environment variable: WAZUH_ALERT_JSON_PATH")
 
+
+    def validate_wazuh_indexer(self) -> None:
+        """Validate Wazuh Indexer settings required for indexer ingestion.
+
+        Opt-in like every other validator here, so replay mode and the json_logs
+        source keep working with these keys empty. It is the check to call before
+        building `soc.wazuh_indexer_client.WazuhIndexerClient` from settings.
+
+        Inputs:
+            None. Uses the Wazuh Indexer fields from this settings object.
+
+        Outputs:
+            None.
+
+        Raises:
+            ConfigError: If a required Wazuh Indexer setting is missing.
+        """
+
+        _require_non_empty("WAZUH_INDEXER_URL", self.wazuh_indexer_url)
+        _require_non_empty("WAZUH_INDEXER_USER", self.wazuh_indexer_user)
+        _require_non_empty("WAZUH_INDEXER_PASSWORD", self.wazuh_indexer_password)
 
     def validate_wazuh_manager(self) -> None:
         """Validate only the Wazuh Manager settings required for agent context.
@@ -298,6 +331,26 @@ class Settings:
         _require_non_empty("SPLUNK_HEC_URL", self.splunk_hec_url)
         _require_non_empty("SPLUNK_HEC_TOKEN", self.splunk_hec_token)
 
+
+    def validate_splunk_search(self) -> None:
+        """Validate settings required to read events from Splunk.
+
+        Empty defaults rather than validation at load time keep replay mode working
+        with an empty `.env`, matching every other optional integration. This names
+        the missing key instead of letting the failure surface as a request error.
+
+        Inputs:
+            None. Uses Splunk search fields from this settings object.
+
+        Outputs:
+            None.
+
+        Raises:
+            ConfigError: If a required Splunk search setting is missing.
+        """
+
+        _require_non_empty("SPLUNK_SEARCH_URL", self.splunk_search_url)
+        _require_non_empty("SPLUNK_SEARCH_TOKEN", self.splunk_search_token)
     def validate_openbsd_pf(self) -> None:
         """Validate later-phase OpenBSD pfctl integration settings.
 
@@ -488,6 +541,13 @@ def _load_settings_from_env() -> Settings:
         splunk_hec_token=_get_str("SPLUNK_HEC_TOKEN", ""),
         splunk_hec_index=_get_str("SPLUNK_HEC_INDEX", ""),
         splunk_hec_sourcetype=_get_str("SPLUNK_HEC_SOURCETYPE", "ai_triage"),
+        splunk_search_url=_get_str("SPLUNK_SEARCH_URL", ""),
+        splunk_search_token=_get_str("SPLUNK_SEARCH_TOKEN", ""),
+        splunk_search_query=_get_str("SPLUNK_SEARCH_QUERY", ""),
+        splunk_search_earliest=_get_str("SPLUNK_SEARCH_EARLIEST", ""),
+        splunk_search_latest=_get_str("SPLUNK_SEARCH_LATEST", ""),
+        splunk_search_limit=_get_int("SPLUNK_SEARCH_LIMIT", 0),
+        splunk_search_verify_tls=_get_bool("SPLUNK_SEARCH_VERIFY_TLS", True),
         openbsd_pf_enabled=_get_bool("OPENBSD_PF_ENABLED", False),
         openbsd_pf_host=_get_str("OPENBSD_PF_HOST", ""),
         openbsd_pf_user=_get_str("OPENBSD_PF_USER", ""),

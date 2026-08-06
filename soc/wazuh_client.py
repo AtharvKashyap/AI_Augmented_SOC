@@ -13,6 +13,15 @@ Wazuh alerts.json, usually /var/ossec/logs/alerts/alerts.json:
 - read line-delimited JSON alerts
 - filter by timestamp and rule.level
 - convert alerts into RawEvent objects for SOCPipeline.run_events()
+
+`WAZUH_ALERT_SOURCE` selects which of the two retrieval paths `WazuhClient`
+carries, and exactly one is ever built:
+
+- `json_logs` builds a `WazuhAlertJsonReader` over alerts.json. Unchanged.
+- `indexer` builds a `soc.wazuh_indexer_client.WazuhIndexerClient` against the
+  Wazuh Indexer (OpenSearch). Selecting it without indexer settings raises,
+  because a silent downgrade to "no alerts" is indistinguishable from a quiet
+  network.
 """
 
 from __future__ import annotations
@@ -35,6 +44,14 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from soc.models import EventSource, RawEvent, utc_now
 from soc.store import IngestCursor
+from soc.wazuh_indexer_client import (
+    INDEXER_ALERT_SOURCE,
+    PASSWORD_SETTING,
+    URL_SETTING,
+    USER_SETTING,
+    WazuhIndexerClient,
+    WazuhIndexerError,
+)
 
 if TYPE_CHECKING:
     from soc.config import Settings
@@ -43,6 +60,9 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 JsonDict = dict[str, Any]
+
+JSON_LOGS_ALERT_SOURCE = "json_logs"
+"""Value of WAZUH_ALERT_SOURCE that selects the alerts.json reader."""
 
 WAZUH_ALERT_CURSOR_SOURCE = "wazuh_alerts_json"
 """Logical ingestion source name used for alerts.json read cursors."""
@@ -564,18 +584,44 @@ class WazuhAlertJsonReader:
 
 
 class WazuhClient:
-    """Facade for Manager-only Wazuh ingestion into SOC RawEvent objects."""
+    """Facade for Wazuh ingestion into SOC RawEvent objects.
+
+    Exactly one retrieval path is carried: an alerts.json reader or a Wazuh
+    Indexer client. The Manager API half is optional either way and only supplies
+    agent inventory context.
+    """
 
     def __init__(
         self,
         *,
         manager: WazuhManagerClient | None = None,
-        alert_reader: WazuhAlertJsonReader,
+        alert_reader: WazuhAlertJsonReader | None = None,
+        indexer: WazuhIndexerClient | None = None,
     ) -> None:
-        """Initialize facade client."""
+        """Initialize facade client.
+
+        Inputs:
+            manager: Optional Manager API client used only for agent inventory.
+            alert_reader: alerts.json reader, for the json_logs source.
+            indexer: Wazuh Indexer client, for the indexer source.
+
+        Outputs:
+            None.
+
+        Raises:
+            WazuhError: If neither or both retrieval paths are supplied. Both
+                would make it ambiguous which one produced a given event, and the
+                event IDs of the two paths differ deliberately.
+        """
+
+        if alert_reader is None and indexer is None:
+            raise WazuhError("WazuhClient requires either an alert_reader or an indexer")
+        if alert_reader is not None and indexer is not None:
+            raise WazuhError("WazuhClient accepts an alert_reader or an indexer, not both")
 
         self.manager = manager
         self.alert_reader = alert_reader
+        self.indexer = indexer
 
     @classmethod
     def from_settings(
@@ -583,24 +629,38 @@ class WazuhClient:
         settings: Settings,
         *,
         cursor_store: IngestCursorStore | None = None,
+        opener: Callable[..., Any] | None = None,
+        sleep: Callable[[float], None] | None = None,
     ) -> WazuhClient:
-        """Build a Manager-only Wazuh client from application settings.
+        """Build a Wazuh client for the configured alert source.
 
         Inputs:
             settings: Application settings object.
-            cursor_store: Optional ingestion cursor persistence. Supply it for
-                unattended polling so each cycle reads only new alert lines;
-                omit it for one-shot CLI runs, which read the whole file.
+            cursor_store: Optional ingestion cursor persistence, used only by the
+                json_logs source. Supply it for unattended polling so each cycle
+                reads only new alert lines; omit it for one-shot CLI runs, which
+                read the whole file.
+            opener: Optional HTTP opener passed to the indexer client, so tests
+                never touch the network. Ignored by the json_logs source.
+            sleep: Optional sleep callable passed to the indexer client, so tests
+                never wait on retry backoff. Ignored by the json_logs source.
 
         Outputs:
             WazuhClient instance.
 
         Raises:
-            WazuhError: If WAZUH_ALERT_SOURCE is not json_logs.
+            WazuhError: If WAZUH_ALERT_SOURCE is unknown, or is `indexer` while
+                the indexer settings are missing. The second case fails loudly
+                rather than yielding zero events, which would be indistinguishable
+                from a quiet environment.
         """
 
-        if settings.wazuh_alert_source != "json_logs":
-            raise WazuhError("Manager-only Wazuh mode requires WAZUH_ALERT_SOURCE=json_logs")
+        source = str(settings.wazuh_alert_source or "").strip()
+        if source not in {JSON_LOGS_ALERT_SOURCE, INDEXER_ALERT_SOURCE}:
+            raise WazuhError(
+                f"Unsupported WAZUH_ALERT_SOURCE={source or '(empty)'}. Supported values: "
+                f"{JSON_LOGS_ALERT_SOURCE}, {INDEXER_ALERT_SOURCE}"
+            )
 
         manager = None
         if _has_manager_settings(settings):
@@ -612,6 +672,12 @@ class WazuhClient:
                     password=settings.wazuh_manager_password,
                     verify_tls=settings.wazuh_manager_verify_tls,
                 )
+            )
+
+        if source == INDEXER_ALERT_SOURCE:
+            return cls(
+                manager=manager,
+                indexer=_build_indexer_client(settings, opener=opener, sleep=sleep),
             )
 
         alert_reader = WazuhAlertJsonReader(
@@ -650,13 +716,34 @@ class WazuhClient:
         """Fetch recent Wazuh alerts and convert them to RawEvent objects.
 
         The optional lookback/min_level/limit parameters are accepted for
-        compatibility with run_pipeline.py. The alert reader already has these
-        values from settings, so this method does not need to rebuild it.
+        compatibility with run_pipeline.py. The configured retrieval path already
+        has these values from settings, so this method does not need to rebuild it.
+
+        Inputs:
+            lookback_minutes: Accepted and ignored.
+            min_level: Accepted and ignored.
+            limit: Accepted and ignored.
+            include_agent_inventory: Whether to enrich payloads with Manager
+                agent context. Requires Manager credentials; without them the
+                inventory is empty and ingestion still works.
+
+        Outputs:
+            RawEvent objects ready for SOCPipeline.run_events(). Their IDs differ
+            per retrieval path, so the same alert read from the Indexer and from
+            alerts.json does not overwrite one audit row.
+
+        Raises:
+            WazuhRequestError: If the alerts.json path is unusable.
+            WazuhIndexerError: If an Indexer search fails.
         """
 
         _ = lookback_minutes, min_level, limit
         agent_inventory = self.fetch_agent_inventory() if include_agent_inventory else {}
-        return self.alert_reader.fetch_recent_events(agent_inventory=agent_inventory)
+        if self.indexer is not None:
+            return self.indexer.fetch_recent_events(agent_inventory=agent_inventory)
+        if self.alert_reader is not None:
+            return self.alert_reader.fetch_recent_events(agent_inventory=agent_inventory)
+        raise WazuhError("WazuhClient has no configured retrieval path")
 
 
 def raw_event_from_alert_json(
@@ -681,6 +768,43 @@ def raw_event_from_alert_json(
         payload=payload,
         received_at=utc_now(),
     )
+
+
+def _build_indexer_client(
+    settings: Settings,
+    *,
+    opener: Callable[..., Any] | None,
+    sleep: Callable[[float], None] | None,
+) -> WazuhIndexerClient:
+    """Build the Wazuh Indexer client for WAZUH_ALERT_SOURCE=indexer.
+
+    A missing or unusable indexer configuration is re-raised as a WazuhError, so
+    every failure of `WazuhClient.from_settings` stays inside this module's error
+    hierarchy, and the message names both the settings to populate and the
+    alternative source. Returning an empty client instead would report "no
+    alerts" for a deployment that is simply not configured.
+
+    Inputs:
+        settings: Application settings object.
+        opener: Optional HTTP opener forwarded to the indexer client.
+        sleep: Optional sleep callable forwarded to the indexer client.
+
+    Outputs:
+        WazuhIndexerClient instance.
+
+    Raises:
+        WazuhError: If the indexer settings are missing or unusable.
+    """
+
+    try:
+        return WazuhIndexerClient.from_settings(settings, opener=opener, sleep=sleep)
+    except WazuhIndexerError as exc:
+        raise WazuhError(
+            f"WAZUH_ALERT_SOURCE={INDEXER_ALERT_SOURCE} needs {URL_SETTING}, "
+            f"{USER_SETTING} and {PASSWORD_SETTING} to be set; "
+            f"set them, or use WAZUH_ALERT_SOURCE=json_logs to read alerts.json instead. "
+            f"({exc})"
+        ) from exc
 
 
 def _has_manager_settings(settings: Settings) -> bool:

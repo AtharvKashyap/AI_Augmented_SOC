@@ -164,6 +164,55 @@ class LabeledCase:
         return 0
 
 
+# Stands in for a model name when a case was scored by deterministic local triage.
+# A null or empty string in a comparison key reads as missing data; local scoring is
+# a legitimate, reproducible configuration and the summary should say so.
+LOCAL_SCORING_LABEL = "local"
+
+
+@dataclass(frozen=True, slots=True)
+class CaseScore:
+    """One case's triage outcome together with what produced it.
+
+    Recording the prompt version and model per case rather than per run is
+    deliberate: rate limits push individual cases into local fallback, so a run
+    can be partly model-scored. Reporting one model name for the whole run would
+    hide that some scores never came from it.
+
+    Attributes:
+        score: Score triage produced.
+        action: Action triage produced.
+        prompt_version: Prompt version that produced the score, or None for local.
+        model: Model that produced the score, or None for local.
+    """
+
+    score: int
+    action: TriageAction
+    prompt_version: str | None = None
+    model: str | None = None
+
+    @classmethod
+    def from_scorer_result(cls, result: Any) -> CaseScore:
+        """Normalize whatever a scorer returned into a CaseScore.
+
+        The `(score, action)` pair predates this class and is the seam tests use to
+        drive the metric arithmetic directly. Those tests have no model to report,
+        so forcing them to construct provenance they do not have would make them
+        lie about where a score came from.
+
+        Inputs:
+            result: A CaseScore or a (score, action) pair.
+
+        Outputs:
+            CaseScore.
+        """
+
+        if isinstance(result, cls):
+            return result
+        score, action = result
+        return cls(score=score, action=action)
+
+
 @dataclass(frozen=True, slots=True)
 class CaseOutcome:
     """Result of scoring one labeled case.
@@ -175,6 +224,8 @@ class CaseOutcome:
         in_band: Whether the score fell inside the expected band.
         action_agreed: Whether the action was one of the expected actions.
         score_error: Distance outside the expected band, zero when in band.
+        prompt_version: Prompt version that produced the score, or None for local.
+        model: Model that produced the score, or None for local.
     """
 
     case: LabeledCase
@@ -183,6 +234,8 @@ class CaseOutcome:
     in_band: bool
     action_agreed: bool
     score_error: int
+    prompt_version: str | None = None
+    model: str | None = None
 
     @property
     def is_missed_true_positive(self) -> bool:
@@ -294,6 +347,23 @@ class EvaluationReport:
             outcome.case.provenance is LabelProvenance.ANALYST_REVIEWED for outcome in self.outcomes
         )
 
+    def _counts_of(self, field_name: str) -> dict[str, int]:
+        """Count how many outcomes carry each value of one provenance field.
+
+        Inputs:
+            field_name: `prompt_version` or `model`.
+
+        Outputs:
+            Mapping of value to case count, with None rendered as
+            `LOCAL_SCORING_LABEL`.
+        """
+
+        counts: dict[str, int] = {}
+        for outcome in self.outcomes:
+            key = getattr(outcome, field_name) or LOCAL_SCORING_LABEL
+            counts[key] = counts.get(key, 0) + 1
+        return counts
+
     def to_summary(self) -> JsonDict:
         """Return a JSON-safe summary of the run.
 
@@ -317,6 +387,9 @@ class EvaluationReport:
                 for (expected, actual), count in sorted(self.action_confusion.items())
             },
             "provenance_counts": dict(self.provenance_counts),
+            # Comparison keys: two runs are only comparable when these match.
+            "prompt_versions": self._counts_of("prompt_version"),
+            "models": self._counts_of("model"),
             "is_analyst_validated": self.is_analyst_validated,
             "cases": [
                 {
@@ -329,6 +402,8 @@ class EvaluationReport:
                     "action": outcome.action.value,
                     "in_band": outcome.in_band,
                     "action_agreed": outcome.action_agreed,
+                    "prompt_version": outcome.prompt_version,
+                    "model": outcome.model,
                 }
                 for outcome in self.outcomes
             ],
@@ -596,7 +671,8 @@ def evaluate_cases(
     cases: Iterable[LabeledCase],
     *,
     triage_engine: TriageEngine | None = None,
-    score_action_source: Callable[[LabeledCase], tuple[int, TriageAction]] | None = None,
+    score_action_source: Callable[[LabeledCase], CaseScore | tuple[int, TriageAction]]
+    | None = None,
 ) -> EvaluationReport:
     """Score every labeled case and aggregate the outcomes.
 
@@ -604,8 +680,9 @@ def evaluate_cases(
         cases: Labeled cases to evaluate.
         triage_engine: Engine used to score each case. Defaults to deterministic
             local triage, so an evaluation run needs no API key.
-        score_action_source: Optional override returning (score, action) for a
-            case, used to test the metric arithmetic directly.
+        score_action_source: Optional override returning a CaseScore, or a bare
+            (score, action) pair, for a case. Used to test the metric arithmetic
+            directly.
 
     Outputs:
         EvaluationReport.
@@ -622,15 +699,17 @@ def evaluate_cases(
 
     report = EvaluationReport()
     for case in case_list:
-        score, action = scorer(case)
+        scored = CaseScore.from_scorer_result(scorer(case))
         report.outcomes.append(
             CaseOutcome(
                 case=case,
-                score=score,
-                action=action,
-                in_band=case.score_error(score) == 0,
-                action_agreed=action in case.expected_actions,
-                score_error=case.score_error(score),
+                score=scored.score,
+                action=scored.action,
+                in_band=case.score_error(scored.score) == 0,
+                action_agreed=scored.action in case.expected_actions,
+                score_error=case.score_error(scored.score),
+                prompt_version=scored.prompt_version,
+                model=scored.model,
             )
         )
         key = case.provenance.value
@@ -639,9 +718,7 @@ def evaluate_cases(
     return report
 
 
-def _build_triage_scorer(
-    engine: TriageEngine,
-) -> Callable[[LabeledCase], tuple[int, TriageAction]]:
+def _build_triage_scorer(engine: TriageEngine) -> Callable[[LabeledCase], CaseScore]:
     """Build a scorer that runs a case's fixture through the real pipeline stages.
 
     A fixture yielding one event is scored as an alert; several events are
@@ -652,14 +729,14 @@ def _build_triage_scorer(
         engine: Triage engine to score with.
 
     Outputs:
-        Callable returning (score, action) for a labeled case.
+        Callable returning a CaseScore for a labeled case.
     """
 
     normalizer = Normalizer()
     clusterer = AlertClusterer()
     enricher = LocalEnricher()
 
-    def _score(case: LabeledCase) -> tuple[int, TriageAction]:
+    def _score(case: LabeledCase) -> CaseScore:
         """Score one labeled case."""
 
         events = load_replay_file(case.fixture)
@@ -676,7 +753,12 @@ def _build_triage_scorer(
                 raise EvaluationError(f"Labeled case {case.id} produced no candidate")
             candidate = candidates[0]
             result = engine.triage_candidate(candidate, enricher.enrich_candidate(candidate))
-        return result.score, result.action
+        return CaseScore(
+            score=result.score,
+            action=result.action,
+            prompt_version=result.prompt_version,
+            model=result.model,
+        )
 
     return _score
 

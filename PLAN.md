@@ -63,7 +63,11 @@ The phases below are all still in scope.
 #### Milestone 1.1 — Wazuh API client
 - [x] Implement authentication against Wazuh Manager REST API (port 55000)
 - [x] Poll Wazuh agent inventory using the API to build local context (hostname, IP, OS, status)
-- [~] Pull Wazuh alert data from the configured Wazuh alert source available in the environment: Wazuh indexer/search backend, Wazuh alert JSON logs, or Wazuh data mirrored into Security Onion — **`json_logs` only.** `WazuhClient.from_settings` rejects any other `WAZUH_ALERT_SOURCE`. Indexer settings exist in `Settings` with no client behind them.
+- [x] Pull Wazuh alert data from the configured Wazuh alert source available in the environment: Wazuh indexer/search backend, Wazuh alert JSON logs, or Wazuh data mirrored into Security Onion — all three exist. `WAZUH_ALERT_SOURCE` selects `json_logs` or `indexer` (`soc/wazuh_indexer_client.py`, OpenSearch `_search` over `wazuh-alerts-*`); mirrored data is `--security-onion --wazuh-mirror`.
+  - The window and level filters are applied **twice**: once in the query and again locally, with the local pass authoritative. An index template mapping `rule.level` as a keyword would silently not honour the range filter. `min_level=0` adds no level filter at all, so "ingest everything" cannot become "ingest nothing".
+  - The hit `_id` is deliberately unused for the event ID. OpenSearch assigns it per indexed document, so a reindexed alert would arrive with a new one and be processed twice. IDs are a content fingerprint of `_source`, prefixed `wazuh-indexer-`.
+  - Verified independently, not just by the tests: the password *and* the base64 Basic blob are scrubbed from an echoed 500 body, a 401 is attempted exactly once, and one alert read via indexer / Splunk search / `alerts.json` yields three distinct IDs.
+  - **`--wazuh --daemon` with `indexer` has no read cursor** — that concept is file-offset-specific. Each cycle re-queries the whole lookback window and relies on content dedup to suppress repeats. Correct but more work per cycle than the file path.
 - [x] Support configurable minimum severity level (`WAZUH_MIN_LEVEL`)
 - [x] Parse alert fields when present: `rule.level`, `rule.description`, `rule.groups`, `agent.name`, `agent.ip`, `agent.id`, `data.*`, `full_log`
 - [x] Handle token expiry and auto-refresh — re-authenticates once on 401/403 via `request(retry_auth=True)`
@@ -85,8 +89,8 @@ Implemented in `soc/security_onion_client.py` against the **Security Onion Conne
 
 - [x] Authenticate to the Security Onion search/API endpoint — OAuth2 client credentials: `POST /oauth2/token` with HTTP Basic auth and `grant_type=client_credentials`, returning a bearer token cached until shortly before `expires_in` elapses. Create the client under Administration → API Clients with the `events/read` permission.
 - [x] Query Security Onion alert data by severity and time window — `GET /connect/query/data`. Severity is compared through `severity_from_security_onion` rather than numerically, because Suricata numbers severity *downwards*: with `SO_MIN_SEVERITY=2`, severities 1 and 2 are kept and 3+ dropped. Documents with no interpretable severity are kept rather than silently dropped.
-- [~] Query Zeek connection, DNS, and HTTP logs by source or destination IP — reachable through the same endpoint by supplying a `query`, but no dedicated Zeek helper methods yet
-- [~] Optionally query Wazuh data mirrored into Security Onion — possible via the `query` parameter; not wired as a distinct source
+- [x] Query Zeek connection, DNS, and HTTP logs by source or destination IP — `fetch_zeek_conn_events`, `fetch_zeek_dns_events`, `fetch_zeek_http_events` on `SecurityOnionClient`. An address matches source *or* destination, since inbound traffic to a compromised host is the direction that matters most. Addresses are validated as IPs before interpolation, because they originate from attacker-controlled alert data. The alert severity floor is not applied: Zeek logs carry no severity, so the floor would return nothing while looking like the host had no traffic.
+- [x] Optionally query Wazuh data mirrored into Security Onion — `fetch_wazuh_mirror_events`, selectable as `run_pipeline.py --security-onion --wazuh-mirror`. **Mirrored events are tagged `EventSource.WAZUH`, not `SECURITY_ONION`**: the event originated in Wazuh and Security Onion was only the transport, so tagging by transport would route it to a normalizer expecting Suricata/Zeek field paths and silently drop its rule and agent fields. IDs carry an `so-wazuh-mirror-` prefix so the mirrored copy cannot overwrite the `alerts.json` copy's audit row. `--wazuh-mirror` without `--security-onion` is rejected before source dispatch, since ignoring it would read the ordinary alert stream while the operator believed otherwise.
 - [x] Parse alert fields when present — handled by the existing `normalize_security_onion_event`. A test asserts the full seam: a Connect API document becomes a `RawEvent` that normalizes to an `Alert` with the expected `src_ip`, `dst_ip`, `rule_name`, `hostname`, and severity.
 - [x] Keep Security Onion access restricted to the management/SOC network — documented in `.env.example` and Security notes; `SECURITYONION_VERIFY_TLS` defaults to true
 - [x] Tolerate undocumented response shapes — one extractor handles a top-level `events` list, a nested `data.events` list, and Elasticsearch-style `hits.hits[]._source`. An unrecognized shape returns nothing and logs a warning naming the keys actually received, so a real deployment is diagnosable from logs.
@@ -113,11 +117,11 @@ Implemented in `soc/security_onion_client.py` against the **Security Onion Conne
 - [x] Support `python3 run_pipeline.py --replay tests/fixtures/sample_incident_replay.json` — the CLI is `run_pipeline.py`, not the originally planned `run_triage.py`, whose empty placeholder was deleted
 - [x] Support manual JSON event files in `tests/fixtures/manual_events/` — via `--replay-dir` / `load_replay_directory`
 - [x] Allow replay mode to pass through the same normalizer, dedup, clustering, triage, and routing code as live mode
-- [~] Add fixtures for common scenarios: benign Wazuh alert, suspicious endpoint alert, Suricata IDS alert, suspicious DNS event, and combined endpoint + network incident — four fixtures exist (`sample_wazuh_alert`, `sample_so_alert`, `sample_incident_replay`, `manual_events/sample_manual_incident`); the benign and DNS scenarios are missing, and these five are the natural seed for the labeled set in 2.5
+- [x] Add fixtures for common scenarios: benign Wazuh alert, suspicious endpoint alert, Suricata IDS alert, suspicious DNS event, and combined endpoint + network incident — all present (`sample_wazuh_alert`, `sample_wazuh_benign_alert`, `sample_so_alert`, `sample_dns_suspicious_alert`, `sample_incident_replay`, `manual_events/sample_manual_incident`)
 
 #### Milestone 1.6 — Polling daemon
 - [x] Implement main polling loop with configurable `POLL_INTERVAL_SECONDS` — `soc/daemon.py`, driven by `run_pipeline.py --daemon`, with `--poll-interval` and `--max-cycles` overrides
-- [~] Wire Wazuh client + Security Onion client + normalizer + dedup into loop — Wazuh, normalizer, dedup, and the read cursor are wired; Security Onion waits on Milestone 1.2. Replay sources also work, mainly for testing the loop.
+- [x] Wire Wazuh client + Security Onion client + normalizer + dedup into loop — all wired, including `--security-onion` in daemon mode. Replay sources also work, mainly for testing the loop.
 - [x] Structured logging (JSON lines) to `logs/` — one `cycle_completed` or `cycle_failed` record per cycle, plus start/stop records
 - [x] Graceful shutdown on SIGINT / SIGTERM — signals set a flag and the loop exits at the next safe point, never mid-cycle; the wait between cycles is sliced so shutdown does not have to sit out a long poll interval
 - [x] Survive a failing cycle — a cycle that raises is logged and the loop continues. A daemon that dies because one poll failed stops processing alerts silently, which is worse than a noisy failure.
@@ -147,7 +151,7 @@ Verified end to end against a growing `alerts.json`: cycle 1 read 2 alerts and p
 
 #### Milestone 2.0 — Alert clustering
 - [x] Implement `clustering.py` to group related alerts by host, agent, user, src IP, dst IP, and configurable time window
-- [~] Define `IncidentCandidate` dataclass with `id`, `first_seen`, `last_seen`, `primary_host`, `primary_user`, `src_ips`, `dst_ips`, `alerts`, `related_events`, `asset_context`, and `enrichment` — all present except `asset_context`, which lands with Milestone 3.1
+- [x] Define `IncidentCandidate` dataclass with `id`, `first_seen`, `last_seen`, `primary_host`, `primary_user`, `src_ips`, `dst_ips`, `alerts`, `related_events`, `asset_context`, and `enrichment` — all present; `asset_context` landed with Milestone 3.1
 - [x] Allow low-volume environments to triage single alerts when no meaningful cluster exists
 - [x] Assign local incident candidate IDs (`CAND-YYYYMMDD-NNN`) — actual format is `CAND-YYYYMMDD-NNN-<content hash>`; the hash makes reruns idempotent and is worth keeping
 - [x] Store candidate-to-alert mappings in SQLite for audit and reporting
@@ -184,7 +188,7 @@ Verified end to end against a growing `alerts.json`: cycle 1 read 2 alerts and p
 
 #### Milestone 2.4 — Analyst notification
 - [x] Implement `PAGE_NOW` path: send formatted Slack message or email with triage summary and raw alert link
-- [~] Implement `QUEUE_REVIEW` path: append to analyst review queue (SQLite table) — a `routing_decisions` row is written, but there is no queue table, no work-list, and no way to mark an item handled. Nothing can currently be *reviewed*.
+- [x] Implement `QUEUE_REVIEW` path: append to analyst review queue (SQLite table) — the `analyst_queue` table holds the work-list and `run_review.py` lists, shows, and closes items with an analyst name and verdict.
 - [x] Implement `MARK_LIKELY_BENIGN` path: log, mark likely benign, and keep searchable
 
 #### Milestone 2.4a — Make the review queue real *(new)*
@@ -205,7 +209,7 @@ The gap that mattered most: nothing distinguished good triage from bad, so no pr
 - [x] Local half runs in CI on every push via `run_eval.py --fail-under-thresholds`; the LLM half is opt-in through `--llm` so CI needs no API key. In LLM mode fallback is **disabled**, so a failed model call is a visible error rather than a local score quietly standing in for one and skewing the measurement.
 - [x] Exit criteria are executable: `EvaluationThresholds` encodes them and `check()` returns one message per unmet criterion, so a build can be gated on triage quality.
 - [x] Label provenance is tracked and surfaced. `is_analyst_validated` is false for any run containing a synthetic label, and the CLI prints the caveat to stderr on every such run, so a self-consistency run can never be quietly reported as an accuracy result.
-- [ ] Record prompt version and model on every eval run so results are comparable over time — the triage result carries both; the eval summary does not yet copy them through
+- [x] Record prompt version and model on every eval run so results are comparable over time — the summary carries `prompt_versions` and `models` as *counts*, plus per-case attribution. Counts rather than one value per run, because rate limits push individual cases into local fallback: reporting a single model name would hide that some scores never came from it. A locally scored case is labeled `local`, not left null.
 
 **First run found two real defects** in local scoring, which is the harness earning its place:
 
@@ -320,7 +324,7 @@ Deterministic Markdown reporting already works and is tested — `MarkdownReport
 #### Milestone 4.4 — Report delivery
 - [x] Implement `run_report.py` with `list`, `show` and `generate` subcommands; `generate` takes `--output`, `--notes`/`--notes-file`, `--no-llm` and `--email`
 - [x] Email delivery of the Markdown report as a `text/markdown` attachment, with the summary still in the body so a client that cannot render the attachment is not left with nothing
-- [ ] Later phase: post report summary to Splunk via HEC webhook (Milestone 5.1)
+- [x] Post report summary to Splunk via HEC — `run_report.py generate --splunk`. Only the incident summary is sent; the report body stays local, since it is already written to disk and emailable and a Splunk index is the wrong place to accumulate narrative documents. A push failure is recorded, not raised: the report file already exists by then, so failing would report it as unproduced.
 
 **Exit criteria:** Analyst can run `python3 run_report.py generate <incident-id>` and receive a drafted Markdown incident report, optionally by email. Every report states whether it was LLM-drafted or templated. The same reporting logic summarizes replay-generated incidents for testing, and report generation still succeeds with no API key configured.
 
@@ -343,22 +347,22 @@ Both integrations are optional: with Splunk and pflog unconfigured the pipeline 
 - [x] Only derived fields are sent, never raw source events or enrichment `raw`. A Splunk index should not become a second copy of raw telemetry.
 - [x] The HEC token is scrubbed from every exception and log line, since HEC error bodies get quoted into messages. Verified by planting the token in a 500 response body.
 - [x] Sending is opt-in, and requesting it unconfigured fails loudly. A push that fails at runtime is recorded but does not fail the run, because results are already persisted locally.
-- [ ] `--splunk` with `--daemon` is refused rather than silently sending nothing each cycle. Per-cycle pushing is a real feature and is not built.
+- [x] `--splunk` with `--daemon` now pushes every cycle. A failed push is logged and recorded in `summary["errors"]` without stopping the loop; the client is built once per run, not per cycle.
 
-#### Milestone 5.2 — Splunk input option — **not built, pending a decision**
-Deliberately left out rather than quietly skipped. Building it means maintaining two ingestion architectures — direct Wazuh/Security Onion readers *and* a Splunk search client — to serve a capability the project does not currently need, and this milestone itself commits to keeping direct ingestion either way. Every ingestion bug would then need reproducing twice.
-- [ ] Add optional Splunk search client as a later ingestion source
-- [ ] Allow Splunk to become a unified read layer after forwarding is configured
-- [ ] Keep direct Wazuh and Security Onion ingestion available even after Splunk is added
+#### Milestone 5.2 — Splunk input option
+Built on request after being initially recommended for cutting. The cost stands as recorded: two ingestion architectures mean every ingestion bug can need reproducing twice. Direct ingestion remains the default and is pinned by a test asserting `--wazuh` never consults the search client.
+- [x] Add optional Splunk search client as a later ingestion source — `soc/splunk_search_client.py`, selectable as `run_pipeline.py --splunk-search`. Creates a search job, polls it under a bounded attempt count with an injected sleep, and reads the results. An unrecognized job-completion rendering reads as *not finished*, so a Splunk version mismatch trips the poll bound and reports itself rather than silently returning a partial job. 401/403 is not retried; 5xx is.
+- [x] Allow Splunk to become a unified read layer after forwarding is configured — a row's `sourcetype`/`source`/`index` can reclassify it as Wazuh or Security Onion so it normalizes with the right field paths. Detection is deliberately conservative: anything ambiguous stays `EventSource.SPLUNK` and normalizes generically, because guessing wrong hands a payload to a normalizer expecting different fields. **Event IDs are prefixed `splunk-search-`**, so one alert read through Splunk and the same alert read from `alerts.json` cannot overwrite each other's audit row.
+- [x] Keep direct Wazuh and Security Onion ingestion available even after Splunk is added — unchanged, and pinned by a test.
 
-Recommend cutting unless someone specifically wants Splunk as the read layer. Reopen if so.
+**Not verified against a live Splunk instance.** Every response-shape field name is inferred and isolated in named constants; the request paths, parameters, and bearer auth are from the documented REST API.
 
 #### Milestone 5.3 — OpenBSD `pflog` visibility
 - [x] Ingest parsed `pflog` events — `soc/pflog.py`, via `run_pipeline.py --pflog`. Unparseable lines are skipped, counted and logged rather than fatal, matching the `alerts.json` reader.
 - [x] Normalize into the common `Alert` schema — `normalize_openbsd_pf_event`. **A `block` maps to `LOW` and a `pass` to `INFO`; nothing in this path can return `HIGH`.** A firewall block is the firewall working as configured, and a busy firewall mapped to high severity would bury real detections. This is the same failure mode as the `private_ip` scoring defect the eval harness caught in Phase 3.
 - [x] Correlate firewall blocks with Wazuh and Security Onion alerts — **this needed no new code**: entity-based clustering already merges a pf event with an endpoint alert sharing an address. Verified, and pinned with a test, because emergent behavior with no test regresses silently.
 - [x] Include firewall evidence in triage context — pf alerts join the candidate's alert list and reach the model through the existing allowlist.
-- [ ] `OPENBSD_PFLOG_TEXT_PATH` is a **separate setting** from `OPENBSD_PFLOG_PATH`. The latter is `/var/log/pflog`, a pcap file the parser cannot read; ingestion reads `tcpdump -n -e -ttt -r` text output. Conflating them would have an operator point the reader at binary data and get a silent zero-result run.
+- [x] `OPENBSD_PFLOG_TEXT_PATH` is a **separate setting** from `OPENBSD_PFLOG_PATH`. The latter is `/var/log/pflog`, a pcap file the parser cannot read; ingestion reads `tcpdump -n -e -ttt -r` text output. Conflating them would have an operator point the reader at binary data and get a silent zero-result run.
 
 **The pflog line format is inferred, not verified.** No OpenBSD host was available to check real `tcpdump` output against, so the regex lives in a single `PFLOG_LINE_PATTERN` constant marked as inferred, the same approach as the undocumented Security Onion query parameters. A real deployment corrects that constant and the timestamp formats, nothing else.
 
