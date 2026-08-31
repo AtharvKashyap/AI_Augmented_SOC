@@ -16,4 +16,4 @@ pytest>=9.0.3
 # Pinned to a minor range on purpose: the enabled rule set changes between
 # Ruff minor releases, so an unpinned linter can fail CI on a release that has
 # nothing to do with the change under test. See ruff.toml for the rule set.
-ruff>=0.16.1,<0.17
+ruff>=0.16.5,<0.17
